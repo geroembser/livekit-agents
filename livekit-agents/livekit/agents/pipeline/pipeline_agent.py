@@ -134,6 +134,7 @@ class _ImplOptions:
     max_nested_fnc_calls: int
     preemptive_synthesis: bool
     before_llm_cb: BeforeLLMCallback
+    before_llm_cb_after_function_call: BeforeLLMCallback
     before_tts_cb: BeforeTTSCallback
     plotting: bool
     transcription: AgentTranscriptionOptions
@@ -197,6 +198,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         preemptive_synthesis: bool = False,
         transcription: AgentTranscriptionOptions = AgentTranscriptionOptions(),
         before_llm_cb: BeforeLLMCallback = _default_before_llm_cb,
+        before_llm_cb_after_function_call: BeforeLLMCallback = _default_before_llm_cb,
         before_tts_cb: BeforeTTSCallback = _default_before_tts_cb,
         plotting: bool = False,
         loop: asyncio.AbstractEventLoop | None = None,
@@ -255,6 +257,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             preemptive_synthesis=preemptive_synthesis,
             transcription=transcription,
             before_llm_cb=before_llm_cb,
+            before_llm_cb_after_function_call=before_llm_cb_after_function_call,
             before_tts_cb=before_tts_cb,
         )
         self._plotter = AssistantPlotter(self._loop)
@@ -1056,10 +1059,25 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                     )
                 fnc_ctx = None
 
-            answer_llm_stream = self._llm.chat(
-                chat_ctx=chat_ctx,
-                fnc_ctx=fnc_ctx,
-            )
+            # from original livekit implementation:
+            # answer_llm_stream = self._llm.chat(
+            #     chat_ctx=chat_ctx,
+            #     fnc_ctx=fnc_ctx,
+            # )
+            # now apply also the before_llm_cb to the answer llm stream
+            answer_llm_stream = self._opts.before_llm_cb_after_function_call(self, chat_ctx)
+            if asyncio.iscoroutine(answer_llm_stream):
+                answer_llm_stream = await answer_llm_stream
+
+            if answer_llm_stream is False:
+                # just immediately finish everything
+                self.emit("function_calls_finished", called_fncs)
+                _CallContextVar.reset(tk)
+                return
+
+            # fallback to default impl if no custom/user stream is returned
+            if not isinstance(answer_llm_stream, LLMStream):
+                answer_llm_stream = _default_before_llm_cb(self, chat_ctx=chat_ctx)
 
             synthesis_handle = self._synthesize_agent_speech(
                 new_speech_handle.id, answer_llm_stream
