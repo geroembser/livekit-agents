@@ -1022,6 +1022,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 )
 
             if not tool_calls_info:
+                # that means if there was no result from a function call, then the agent will not answer to this function call!
                 return
 
             # create a nested speech handle
