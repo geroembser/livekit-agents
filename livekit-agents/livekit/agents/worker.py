@@ -175,6 +175,8 @@ class WorkerOptions:
     shutdown_process_timeout: float = 60.0
     """Maximum amount of time to wait for a job to shut down gracefully"""
     initialize_process_timeout: float = 10.0
+    """Maximum amount of time to wait before shutting down unresponsive processes"""
+    ping_timeout: float = 60.0
     """Maximum amount of time to wait for a process to initialize/prewarm"""
     permissions: WorkerPermissions = field(default_factory=WorkerPermissions)
     """Permissions that the agent should join the room with."""
@@ -280,7 +282,7 @@ class Worker(utils.EventEmitter[EventTypes]):
                     memory_warn_mb=2000,
                     memory_limit_mb=0,  # no limit
                     ping_interval=5,
-                    ping_timeout=60,
+                    ping_timeout=self._opts.ping_timeout,
                     high_ping_threshold=2.5,
                     mp_ctx=mp_ctx,
                     loop=self._loop,
@@ -301,6 +303,7 @@ class Worker(utils.EventEmitter[EventTypes]):
             close_timeout=opts.shutdown_process_timeout,
             memory_warn_mb=opts.job_memory_warn_mb,
             memory_limit_mb=opts.job_memory_limit_mb,
+            ping_timeout=opts.ping_timeout,
         )
 
         self._previous_status = agent.WorkerStatus.WS_AVAILABLE
