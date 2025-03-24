@@ -36,8 +36,9 @@ from livekit.agents import (
 
 from .log import logger
 from .models import TTSEncoding, TTSModels
+from .forwarder import ElevenlabsForwarder
 
-_DefaultEncoding: TTSEncoding = "mp3_44100"
+_DefaultEncoding: TTSEncoding = "pcm_22050"
 
 
 def _sample_rate_from_format(output_format: TTSEncoding) -> int:
@@ -94,6 +95,7 @@ class _TTSOptions:
     chunk_length_schedule: list[int]
     enable_ssml_parsing: bool
     inactivity_timeout: int
+    forwarder: ElevenlabsForwarder | None
 
 
 class TTS(tts.TTS):
@@ -108,8 +110,9 @@ class TTS(tts.TTS):
         inactivity_timeout: int = WS_INACTIVITY_TIMEOUT,
         word_tokenizer: Optional[tokenize.WordTokenizer] = None,
         enable_ssml_parsing: bool = False,
-        chunk_length_schedule: list[int] = [80, 120, 200, 260],  # range is [50, 500]
+        chunk_length_schedule: list[int] = [500, 500, 500, 500],  # range is [50, 500]
         http_session: aiohttp.ClientSession | None = None,
+        forwarder: ElevenlabsForwarder | None = None,
         # deprecated
         model_id: TTSModels | str | None = None,
         language: str | None = None,
@@ -169,6 +172,7 @@ class TTS(tts.TTS):
             enable_ssml_parsing=enable_ssml_parsing,
             language=language,
             inactivity_timeout=inactivity_timeout,
+            forwarder=forwarder,
         )
         self._session = http_session
         self._streams = weakref.WeakSet[SynthesizeStream]()
@@ -267,6 +271,7 @@ class ChunkedStream(tts.ChunkedStream):
         decoder = utils.codecs.AudioStreamDecoder(
             sample_rate=self._opts.sample_rate,
             num_channels=1,
+            format="s16le"
         )
 
         decode_task: asyncio.Task | None = None
@@ -388,6 +393,7 @@ class SynthesizeStream(tts.SynthesizeStream):
         segment_id = utils.shortuuid()
         decoder = utils.codecs.AudioStreamDecoder(
             sample_rate=self._opts.sample_rate,
+            format="s16le",
             num_channels=1,
         )
 
@@ -470,10 +476,14 @@ class SynthesizeStream(tts.SynthesizeStream):
                     continue
 
                 data = json.loads(msg.data)
+                
+                # Forward the message if forwarder is configured
+                if self._opts.forwarder is not None:
+                    self._opts.forwarder.add_data(msg.data)
+
                 if data.get("audio"):
                     b64data = base64.b64decode(data["audio"])
                     decoder.push(b64data)
-
                 elif data.get("isFinal"):
                     decoder.end_input()
                     break

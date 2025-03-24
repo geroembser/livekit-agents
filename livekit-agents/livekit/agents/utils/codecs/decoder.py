@@ -94,7 +94,7 @@ class AudioStreamDecoder:
     _max_workers: int = 10
     _executor: Optional[ThreadPoolExecutor] = None
 
-    def __init__(self, *, sample_rate: int = 48000, num_channels: int = 1):
+    def __init__(self, *, sample_rate: int = 48000, num_channels: int = 1, format: Optional[str] = None):
         try:
             import av  # noqa
         except ImportError:
@@ -103,6 +103,8 @@ class AudioStreamDecoder:
             )
 
         self._sample_rate = sample_rate
+        self._num_channels = num_channels
+        self._format = format
         self._layout = "mono"
         if num_channels == 2:
             self._layout = "stereo"
@@ -131,7 +133,21 @@ class AudioStreamDecoder:
 
     def _decode_loop(self):
         try:
-            container = av.open(self._input_buf)
+            if self._format is not None:
+                # Handle raw PCM data with specified format
+                container = av.open(
+                    self._input_buf,
+                    format=self._format,
+                    options={
+                        'sample_rate': str(self._sample_rate),
+                        'channels': str(self._num_channels),
+                        'channel_layout': self._layout
+                    }
+                )
+            else:
+                # Default behavior - auto-detect format
+                container = av.open(self._input_buf)
+
             audio_stream = next(s for s in container.streams if s.type == "audio")
             resampler = av.AudioResampler(
                 # convert to signed 16-bit little endian
