@@ -41,6 +41,9 @@ from livekit.agents.utils import AudioBuffer
 
 import openai
 from openai.types.audio import TranscriptionVerbose
+from openai.types.beta.realtime.transcription_session_update_param import (
+    SessionTurnDetection,
+)
 
 from .log import logger
 from .models import GroqAudioModels, STTModels
@@ -59,9 +62,7 @@ class _STTOptions:
     model: STTModels | str
     language: str
     detect_language: bool
-    vad_threshold: float = 0.5
-    prefix_padding_ms: int = 600
-    silence_duration_ms: int = 350
+    turn_detection: SessionTurnDetection
     prompt: str | None = None
     noise_reduction_type: str | None = None
 
@@ -72,11 +73,9 @@ class STT(stt.STT):
         *,
         language: str = "en",
         detect_language: bool = False,
-        model: STTModels | str = "gpt-4o-mini-transcribe",
+        model: STTModels | str = "gpt-4o-transcribe",
         prompt: str | None = None,
-        vad_threshold: float | None = None,
-        prefix_padding_ms: int | None = None,
-        silence_duration_ms: int | None = None,
+        turn_detection: SessionTurnDetection | None = None,
         noise_reduction_type: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -91,9 +90,8 @@ class STT(stt.STT):
             detect_language: Whether to automatically detect the language.
             model: The OpenAI model to use for transcription.
             prompt: Optional text prompt to guide the transcription. Only supported for whisper-1.
-            vad_threshold: Voice activity detection threshold (0.0 to 1.0).
-            prefix_padding_ms: Padding to add before speech in milliseconds.
-            silence_duration_ms: Duration of silence to consider end of speech in milliseconds.
+            turn_detection: When using realtime transcription, this controls how model detects the user is done speaking.
+                Final transcripts are generated only after the turn is over. See: https://platform.openai.com/docs/guides/realtime-vad
             noise_reduction_type: Type of noise reduction to apply. "near_field" or "far_field"
                 This isn't needed when using LiveKit's noise cancellation.
             base_url: Custom base URL for OpenAI API.
@@ -109,18 +107,21 @@ class STT(stt.STT):
         if detect_language:
             language = ""
 
+        if turn_detection is None:
+            turn_detection = {
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 600,
+                "silence_duration_ms": 350,
+            }
+
         self._opts = _STTOptions(
             language=language,
             detect_language=detect_language,
             model=model,
             prompt=prompt,
+            turn_detection=turn_detection,
         )
-        if vad_threshold is not None:
-            self._opts.vad_threshold = vad_threshold
-        if prefix_padding_ms is not None:
-            self._opts.prefix_padding_ms = prefix_padding_ms
-        if silence_duration_ms is not None:
-            self._opts.silence_duration_ms = silence_duration_ms
         if noise_reduction_type is not None:
             self._opts.noise_reduction_type = noise_reduction_type
 
@@ -201,22 +202,16 @@ class STT(stt.STT):
         model: STTModels | GroqAudioModels | str | None = None,
         language: str | None = None,
         prompt: str | None = None,
-        vad_threshold: float | None = None,
-        prefix_padding_ms: int | None = None,
-        silence_duration_ms: int | None = None,
+        turn_detection: SessionTurnDetection | None = None,
         noise_reduction_type: str | None = None,
     ) -> None:
         self._opts.model = model or self._opts.model
         self._opts.language = language or self._opts.language
         self._opts.prompt = prompt or self._opts.prompt
-        self._opts.vad_threshold = vad_threshold or self._opts.vad_threshold
-        self._opts.prefix_padding_ms = prefix_padding_ms or self._opts.prefix_padding_ms
-        self._opts.silence_duration_ms = (
-            silence_duration_ms or self._opts.silence_duration_ms
-        )
         self._opts.noise_reduction_type = (
             noise_reduction_type or self._opts.noise_reduction_type
         )
+        self._opts.turn_detection = turn_detection or self._opts.turn_detection
 
         for stream in self._streams:
             stream.update_options(language=language or self._opts.language)
@@ -229,21 +224,19 @@ class STT(stt.STT):
                 "input_audio_transcription": {
                     "model": self._opts.model,
                     "prompt": self._opts.prompt or "",
-                    "language": self._opts.language or "",
                 },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": self._opts.vad_threshold,
-                    "prefix_padding_ms": self._opts.prefix_padding_ms,
-                    "silence_duration_ms": self._opts.silence_duration_ms,
-                },
-                # "include": ["item.input_audio_transcription.logprobs"],
+                "turn_detection": self._opts.turn_detection,
             },
         }
+        if self._opts.language:
+            realtime_config["session"]["input_audio_transcription"]["language"] = (
+                self._opts.language
+            )
+
         if self._opts.noise_reduction_type:
-            realtime_config["session"]["input_audio_transcription"][
-                "noise_reduction_type"
-            ] = self._opts.noise_reduction_type
+            realtime_config["session"]["input_audio_noise_reduction"] = {
+                "type": self._opts.noise_reduction_type
+            }
 
         query_params: dict[str, str] = {
             "intent": "transcription",
