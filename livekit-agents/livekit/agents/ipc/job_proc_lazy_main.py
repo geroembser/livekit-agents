@@ -27,7 +27,9 @@ from typing import Any, Callable
 
 from livekit import rtc
 
-from ..job import JobContext, JobProcess, _JobContextVar
+from ..cli import cli
+from ..debug import tracing
+from ..job import JobContext, JobExecutorType, JobProcess, _JobContextVar
 from ..log import logger
 from ..utils import aio, http_context, log_exceptions, shortuuid
 from .channel import Message
@@ -40,6 +42,8 @@ from .proto import (
     InitializeRequest,
     ShutdownRequest,
     StartJobRequest,
+    TracingRequest,
+    TracingResponse,
 )
 
 
@@ -56,7 +60,10 @@ def proc_main(args: ProcStartArgs) -> None:
     from .proc_client import _ProcClient
 
     job_proc = _JobProc(
-        args.initialize_process_fnc, args.job_entrypoint_fnc, args.user_arguments
+        args.initialize_process_fnc,
+        args.job_entrypoint_fnc,
+        JobExecutorType.PROCESS,
+        args.user_arguments,
     )
 
     client = _ProcClient(
@@ -104,9 +111,7 @@ class _InfClient(InferenceExecutor):
     def _on_inference_response(self, resp: InferenceResponse) -> None:
         fut = self._active_requests.pop(resp.request_id, None)
         if fut is None:
-            logger.warning(
-                "received unexpected inference response", extra={"resp": resp}
-            )
+            logger.warning("received unexpected inference response", extra={"resp": resp})
             return
 
         with contextlib.suppress(asyncio.InvalidStateError):
@@ -124,11 +129,12 @@ class _JobProc:
         self,
         initialize_process_fnc: Callable[[JobProcess], Any],
         job_entrypoint_fnc: Callable[[JobContext], Any],
+        executor_type: JobExecutorType,
         user_arguments: Any | None = None,
     ) -> None:
         self._initialize_process_fnc = initialize_process_fnc
         self._job_entrypoint_fnc = job_entrypoint_fnc
-        self._job_proc = JobProcess(user_arguments=user_arguments)
+        self._job_proc = JobProcess(executor_type=executor_type, user_arguments=user_arguments)
         self._job_task: asyncio.Task | None = None
 
         # used to warn users if both connect and shutdown are not called inside the job_entry
@@ -154,9 +160,7 @@ class _JobProc:
             async for msg in cch:
                 if isinstance(msg, StartJobRequest):
                     if self.has_running_job:
-                        logger.warning(
-                            "trying to start a new job while one is already running"
-                        )
+                        logger.warning("trying to start a new job while one is already running")
                         continue
 
                     self._start_job(msg)
@@ -173,13 +177,41 @@ class _JobProc:
                 if isinstance(msg, InferenceResponse):
                     self._inf_client._on_inference_response(msg)
 
+                if isinstance(msg, TracingRequest):
+                    if not self.has_running_job:
+                        logger.warning("tracing request received without running job")
+                        return
+
+                    try:
+                        tracing_tasks = []
+                        for callback in self._job_ctx._tracing_callbacks:
+                            tracing_tasks.append(
+                                asyncio.create_task(callback(), name="job_tracing_callback")
+                            )
+
+                        await asyncio.gather(*tracing_tasks)
+                    except Exception:
+                        logger.exception("error while exeuting tracing tasks")
+
+                    await self._client.send(
+                        TracingResponse(
+                            request_id=msg.request_id,
+                            info=tracing.Tracing._get_job_handle(self._job_ctx.job.id)._export(),
+                        )
+                    )
+
         read_task = asyncio.create_task(_read_ipc_task(), name="job_ipc_read")
 
         await self._exit_proc_flag.wait()
-        await aio.gracefully_cancel(read_task)
+        await aio.cancel_and_wait(read_task)
 
     def _start_job(self, msg: StartJobRequest) -> None:
-        self._room = rtc.Room()
+        if cli.CLI_ARGUMENTS is not None and cli.CLI_ARGUMENTS.console:
+            from .mock_room import MockRoom
+
+            self._room = MockRoom
+        else:
+            self._room = rtc.Room()
 
         @self._room.on("disconnected")
         def _on_room_disconnected(*args):
@@ -195,9 +227,7 @@ class _JobProc:
             self._ctx_shutdown_called = True
 
             with contextlib.suppress(asyncio.InvalidStateError):
-                self._shutdown_fut.set_result(
-                    _ShutdownInfo(user_initiated=True, reason=reason)
-                )
+                self._shutdown_fut.set_result(_ShutdownInfo(user_initiated=True, reason=reason))
 
         self._room._info.name = msg.running_job.job.room.name
 
@@ -226,13 +256,14 @@ class _JobProc:
         )
 
         async def _warn_not_connected_task():
+            if cli.CLI_ARGUMENTS is not None and cli.CLI_ARGUMENTS.console:
+                return
+
             await asyncio.sleep(10)
             if not self._ctx_connect_called and not self._ctx_shutdown_called:
                 logger.warning(
-                    (
-                        "The room connection was not established within 10 seconds after calling job_entry. "
-                        "This may indicate that job_ctx.connect() was not called. "
-                    )
+                    "The room connection was not established within 10 seconds after calling job_entry. "  # noqa: E501
+                    "This may indicate that job_ctx.connect() was not called. "
                 )
 
         warn_unconnected_task = asyncio.create_task(_warn_not_connected_task())
@@ -245,11 +276,12 @@ class _JobProc:
                     exc_info=t.exception(),
                 )
             elif not self._ctx_connect_called and not self._ctx_shutdown_called:
+                if cli.CLI_ARGUMENTS is not None and cli.CLI_ARGUMENTS.console:
+                    return
+
                 logger.warning(
-                    (
-                        "The job task completed without establishing a connection or performing a proper shutdown. "
-                        "Ensure that job_ctx.connect()/job_ctx.shutdown() is called and the job is correctly finalized."
-                    )
+                    "The job task completed without establishing a connection or performing a proper shutdown. "  # noqa: E501
+                    "Ensure that job_ctx.connect()/job_ctx.shutdown() is called and the job is correctly finalized."  # noqa: E501
                 )
 
         job_entry_task.add_done_callback(log_exception)
@@ -302,7 +334,10 @@ def thread_main(
         from .proc_client import _ProcClient
 
         job_proc = _JobProc(
-            args.initialize_process_fnc, args.job_entrypoint_fnc, args.user_arguments
+            args.initialize_process_fnc,
+            args.job_entrypoint_fnc,
+            JobExecutorType.THREAD,
+            args.user_arguments,
         )
 
         client = _ProcClient(

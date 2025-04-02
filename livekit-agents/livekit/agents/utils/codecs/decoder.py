@@ -13,21 +13,19 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import io
-from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncIterator, Optional
-
-from livekit.agents.log import logger
-from livekit.agents.utils import aio
-
-try:
-    # preload to ensure faster startup
-    import av  # noqa
-except ImportError:
-    pass
 import threading
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
+import av
+import av.container
 
 from livekit import rtc
+from livekit.agents.log import logger
+from livekit.agents.utils import aio
 
 
 class StreamBuffer:
@@ -116,11 +114,10 @@ class AudioStreamDecoder:
         self._started = False
         self._input_buf = StreamBuffer()
         self._loop = asyncio.get_event_loop()
+
         if self.__class__._executor is None:
             # each decoder instance will submit jobs to the shared pool
-            self.__class__._executor = ThreadPoolExecutor(
-                max_workers=self.__class__._max_workers
-            )
+            self.__class__._executor = ThreadPoolExecutor(max_workers=self.__class__._max_workers)
 
     def push(self, chunk: bytes):
         self._input_buf.write(chunk)
@@ -132,6 +129,8 @@ class AudioStreamDecoder:
         self._input_buf.end_input()
 
     def _decode_loop(self):
+        container: av.container.InputContainer | None = None
+        resampler: av.AudioResampler | None = None
         try:
             if self._format is not None:
                 # Handle raw PCM data with specified format
@@ -161,42 +160,40 @@ class AudioStreamDecoder:
             for frame in container.decode(audio_stream):
                 if self._closed:
                     return
+
                 for resampled_frame in resampler.resample(frame):
                     nchannels = len(resampled_frame.layout.channels)
-                    data = resampled_frame.to_ndarray().tobytes()
-                    self._output_ch.send_nowait(
+                    self._loop.call_soon_threadsafe(
+                        self._output_ch.send_nowait,
                         rtc.AudioFrame(
-                            data=data,
+                            data=resampled_frame.to_ndarray().tobytes(),
                             num_channels=nchannels,
                             sample_rate=int(resampled_frame.sample_rate),
-                            samples_per_channel=int(
-                                resampled_frame.samples / nchannels
-                            ),
-                        )
+                            samples_per_channel=int(resampled_frame.samples / nchannels),
+                        ),
                     )
+
         except Exception:
             logger.exception("error decoding audio")
         finally:
-            self._output_ch.close()
+            self._loop.call_soon_threadsafe(self._output_ch.close)
+            if container:
+                container.close()
 
     def __aiter__(self) -> AsyncIterator[rtc.AudioFrame]:
         return self
 
     async def __anext__(self) -> rtc.AudioFrame:
-        try:
-            return await self._output_ch.recv()
-        except aio.ChanClosed:
-            raise StopAsyncIteration
+        return await self._output_ch.__anext__()
 
     async def aclose(self):
         if self._closed:
             return
-        self._closed = True
+
         self.end_input()
+        self._closed = True
         self._input_buf.close()
         # wait for decode loop to finish, only if anything's been pushed
-        try:
+        with contextlib.suppress(aio.ChanClosed):
             if self._started:
                 await self._output_ch.recv()
-        except aio.ChanClosed:
-            pass

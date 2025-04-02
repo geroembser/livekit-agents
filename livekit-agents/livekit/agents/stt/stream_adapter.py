@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterable
+from collections.abc import AsyncIterable
 
 from .. import utils
-from ..types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
+from ..types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, APIConnectOptions, NotGivenOr
 from ..vad import VAD, VADEventType
 from .stt import STT, RecognizeStream, SpeechEvent, SpeechEventType, STTCapabilities
 
 
 class StreamAdapter(STT):
     def __init__(self, *, stt: STT, vad: VAD) -> None:
-        super().__init__(
-            capabilities=STTCapabilities(streaming=True, interim_results=False)
-        )
+        super().__init__(capabilities=STTCapabilities(streaming=True, interim_results=False))
         self._vad = vad
         self._stt = stt
 
@@ -29,7 +27,7 @@ class StreamAdapter(STT):
         self,
         buffer: utils.AudioBuffer,
         *,
-        language: str | None,
+        language: NotGivenOr[str],
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ):
         return await self._stt.recognize(
@@ -39,7 +37,7 @@ class StreamAdapter(STT):
     def stream(
         self,
         *,
-        language: str | None = None,
+        language: NotGivenOr[str | None] = NOT_GIVEN,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> RecognizeStream:
         return StreamAdapterWrapper(
@@ -58,7 +56,7 @@ class StreamAdapterWrapper(RecognizeStream):
         *,
         vad: VAD,
         wrapped_stt: STT,
-        language: str | None,
+        language: NotGivenOr[str | None],
         conn_options: APIConnectOptions,
     ) -> None:
         super().__init__(stt=stt, conn_options=conn_options)
@@ -67,9 +65,7 @@ class StreamAdapterWrapper(RecognizeStream):
         self._vad_stream = self._vad.stream()
         self._language = language
 
-    async def _metrics_monitor_task(
-        self, event_aiter: AsyncIterable[SpeechEvent]
-    ) -> None:
+    async def _metrics_monitor_task(self, event_aiter: AsyncIterable[SpeechEvent]) -> None:
         pass  # do nothing
 
     async def _run(self) -> None:
@@ -87,9 +83,7 @@ class StreamAdapterWrapper(RecognizeStream):
             """recognize speech from vad"""
             async for event in self._vad_stream:
                 if event.type == VADEventType.START_OF_SPEECH:
-                    self._event_ch.send_nowait(
-                        SpeechEvent(SpeechEventType.START_OF_SPEECH)
-                    )
+                    self._event_ch.send_nowait(SpeechEvent(SpeechEventType.START_OF_SPEECH))
                 elif event.type == VADEventType.END_OF_SPEECH:
                     self._event_ch.send_nowait(
                         SpeechEvent(
@@ -123,4 +117,4 @@ class StreamAdapterWrapper(RecognizeStream):
         try:
             await asyncio.gather(*tasks)
         finally:
-            await utils.aio.gracefully_cancel(*tasks)
+            await utils.aio.cancel_and_wait(*tasks)

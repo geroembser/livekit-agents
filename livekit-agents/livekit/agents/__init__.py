@@ -12,21 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    cli,
-    ipc,
-    llm,
-    metrics,
-    multimodal,
-    pipeline,
-    stt,
-    tokenize,
-    transcription,
-    tts,
-    utils,
-    vad,
-    voice_assistant,
-)
+from . import cli, ipc, llm, metrics, stt, tokenize, tts, utils, vad  # noqa: F401
 from ._exceptions import (
     APIConnectionError,
     APIError,
@@ -34,10 +20,19 @@ from ._exceptions import (
     APITimeoutError,
     AssignmentTimeoutError,
 )
-from .job import AutoSubscribe, JobContext, JobExecutorType, JobProcess, JobRequest
+from .job import AutoSubscribe, JobContext, JobExecutorType, JobProcess, JobRequest, get_job_context
+from .llm.chat_context import (
+    ChatContent,
+    ChatContext,
+    ChatItem,
+    ChatMessage,
+    ChatRole,
+    FunctionCall,
+    FunctionCallOutput,
+)
+from .llm.tool_context import FunctionTool, function_tool
 from .plugin import Plugin
 from .types import (
-    ATTRIBUTE_AGENT_STATE,
     DEFAULT_API_CONNECT_OPTIONS,
     NOT_GIVEN,
     AgentState,
@@ -46,6 +41,9 @@ from .types import (
     NotGivenOr,
 )
 from .version import __version__
+from .voice import Agent, AgentEvent, AgentSession, ModelSettings, RunContext, io
+from .voice.background_audio import BackgroundAudio
+from .voice.room_io import RoomInputOptions, RoomIO, RoomOutputOptions
 from .worker import Worker, WorkerOptions, WorkerPermissions, WorkerType
 
 __all__ = [
@@ -57,35 +55,42 @@ __all__ = [
     "JobProcess",
     "JobContext",
     "JobRequest",
+    "get_job_context",
     "JobExecutorType",
     "AutoSubscribe",
     "AgentState",
+    "FunctionTool",
+    "function_tool",
+    "ChatContext",
+    "ChatItem",
+    "RoomIO",
+    "RoomInputOptions",
+    "RoomOutputOptions",
+    "ChatMessage",
+    "ChatRole",
+    "ChatContent",
+    "io",
+    "FunctionCall",
+    "FunctionCallOutput",
+    "RunContext",
     "Plugin",
-    "ipc",
-    "stt",
-    "vad",
-    "utils",
-    "tts",
-    "tokenize",
-    "llm",
-    "metrics",
-    "transcription",
-    "pipeline",
-    "multimodal",
-    "voice_assistant",
+    "AgentSession",
+    "AgentEvent",
+    "ModelSettings",
+    "Agent",
     "cli",
     "AssignmentTimeoutError",
     "APIConnectionError",
     "APIError",
     "APIStatusError",
     "APITimeoutError",
-    "ATTRIBUTE_AGENT_STATE",
     "APIConnectOptions",
-    "DEFAULT_API_CONNECT_OPTIONS",
     "AgentState",
     "NotGiven",
     "NOT_GIVEN",
     "NotGivenOr",
+    "DEFAULT_API_CONNECT_OPTIONS",
+    "BackgroundAudio",
 ]
 
 # Cleanup docs of unexported modules

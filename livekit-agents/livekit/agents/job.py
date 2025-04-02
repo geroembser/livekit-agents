@@ -17,21 +17,24 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import logging
 import multiprocessing as mp
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import Enum, unique
-from typing import Any, Callable, Coroutine, Tuple, Union
+from typing import Any, Callable
 
 from livekit import api, rtc
 from livekit.protocol import agent, models
 
 from .ipc.inference_executor import InferenceExecutor
 from .log import logger
+from .utils import http_context
 
 _JobContextVar = contextvars.ContextVar["JobContext"]("agents_job_context")
 
 
-def get_current_job_context() -> JobContext:
+def get_job_context() -> JobContext:
     ctx = _JobContextVar.get(None)
     if ctx is None:
         raise RuntimeError(
@@ -39,6 +42,9 @@ def get_current_job_context() -> JobContext:
         )
 
     return ctx
+
+
+get_current_job_context = get_job_context
 
 
 @unique
@@ -78,6 +84,7 @@ DEFAULT_PARTICIPANT_KINDS: list[rtc.ParticipantKind.ValueType] = [
 
 
 class JobContext:
+    # private ctor
     def __init__(
         self,
         *,
@@ -93,20 +100,42 @@ class JobContext:
         self._room = room
         self._on_connect = on_connect
         self._on_shutdown = on_shutdown
-        self._shutdown_callbacks: list[
-            Callable[[str], Coroutine[None, None, None]],
-        ] = []
+        self._shutdown_callbacks: list[Callable[[str], Coroutine[None, None, None]]] = []
+        self._tracing_callbacks: list[Callable[[], Coroutine[None, None, None]]] = []
         self._participant_entrypoints: list[
-            Tuple[
-                Callable[
-                    [JobContext, rtc.RemoteParticipant], Coroutine[None, None, None]
-                ],
+            tuple[
+                Callable[[JobContext, rtc.RemoteParticipant], Coroutine[None, None, None]],
                 list[rtc.ParticipantKind.ValueType] | rtc.ParticipantKind.ValueType,
             ]
         ] = []
-        self._participant_tasks = dict[Tuple[str, Callable], asyncio.Task[None]]()
+        self._participant_tasks = dict[tuple[str, Callable], asyncio.Task[None]]()
         self._room.on("participant_connected", self._participant_available)
         self._inf_executor = inference_executor
+
+        self._init_log_factory()
+        self._log_fields = {}
+
+    def _init_log_factory(self) -> None:
+        old_factory = logging.getLogRecordFactory()
+
+        def record_factory(*args, **kwargs) -> logging.LogRecord:
+            record = old_factory(*args, **kwargs)
+
+            if self.proc.executor_type != JobExecutorType.PROCESS:
+                try:
+                    ctx = get_job_context()
+                except RuntimeError:
+                    return record
+                else:
+                    if ctx != self:
+                        return record
+
+            for key, value in self._log_fields.items():
+                setattr(record, key, value)
+
+            return record
+
+        logging.setLogRecordFactory(record_factory)
 
     @property
     def inference_executor(self) -> InferenceExecutor:
@@ -114,7 +143,7 @@ class JobContext:
 
     @functools.cached_property
     def api(self) -> api.LiveKitAPI:
-        return api.LiveKitAPI()
+        return api.LiveKitAPI(session=http_context.http_session())
 
     @property
     def proc(self) -> JobProcess:
@@ -144,12 +173,44 @@ class JobContext:
     def agent(self) -> rtc.LocalParticipant:
         return self._room.local_participant
 
+    @property
+    def log_context_fields(self) -> dict[str, Any]:
+        """
+        Returns the current dictionary of log fields that will be injected into log records.
+
+        These fields enable enriched structured logging and can include job metadata,
+        worker ID, trace IDs, or other diagnostic context.
+
+        The returned dictionary can be directly edited, or entirely replaced via assignment
+        (e.g., `job_context.log_context_fields = {...}`)
+        """
+        return self._log_fields
+
+    @log_context_fields.setter
+    def log_context_fields(self, fields: dict[str, Any]) -> None:
+        """
+        Sets the log fields to be injected into future log records.
+
+        Args:
+            fields (dict[str, Any]): A dictionary of key-value pairs representing
+                structured data to attach to each log entry. Typically includes contextual
+                information like job ID, trace information, or worker metadata.
+        """
+        self._log_fields = fields
+
+    def add_tracing_callback(
+        self,
+        callback: Callable[[], Coroutine[None, None, None]],
+    ) -> None:
+        """
+        Add a callback to be called when the job is about to receive a new tracing request.
+        """
+        self._tracing_callbacks.append(callback)
+
     def add_shutdown_callback(
         self,
-        callback: Union[
-            Callable[[], Coroutine[None, None, None]],
-            Callable[[str], Coroutine[None, None, None]],
-        ],
+        callback: Callable[[], Coroutine[None, None, None]]
+        | Callable[[str], Coroutine[None, None, None]],
     ) -> None:
         """
         Add a callback to be called when the job is shutting down.
@@ -216,7 +277,7 @@ class JobContext:
             e2ee: End-to-end encryption options. If provided, the Agent will utilize end-to-end encryption. Note: clients will also need to handle E2EE.
             auto_subscribe: Whether to automatically subscribe to tracks. Default is AutoSubscribe.SUBSCRIBE_ALL.
             rtc_config: Custom RTC configuration to use when connecting to the room.
-        """
+        """  # noqa: E501
         room_options = rtc.RoomOptions(
             e2ee=e2ee,
             auto_subscribe=auto_subscribe == AutoSubscribe.SUBSCRIBE_ALL,
@@ -235,9 +296,7 @@ class JobContext:
 
     def add_participant_entrypoint(
         self,
-        entrypoint_fnc: Callable[
-            [JobContext, rtc.RemoteParticipant], Coroutine[None, None, None]
-        ],
+        entrypoint_fnc: Callable[[JobContext, rtc.RemoteParticipant], Coroutine[None, None, None]],
         *_,
         kind: list[rtc.ParticipantKind.ValueType]
         | rtc.ParticipantKind.ValueType = DEFAULT_PARTICIPANT_KINDS,
@@ -245,7 +304,7 @@ class JobContext:
         """Adds an entrypoint function to be run when a participant joins the room. In cases where
         the participant has already joined, the entrypoint will be run immediately. Multiple unique entrypoints can be
         added and they will each be run in parallel for each participant.
-        """
+        """  # noqa: E501
 
         if entrypoint_fnc in [e for (e, _) in self._participant_entrypoints]:
             raise ValueError("entrypoints cannot be added more than once")
@@ -263,14 +322,12 @@ class JobContext:
 
             if (p.identity, coro) in self._participant_tasks:
                 logger.warning(
-                    f"a participant has joined before a prior participant task matching the same identity has finished: '{p.identity}'"
+                    f"a participant has joined before a prior participant task matching the same identity has finished: '{p.identity}'"  # noqa: E501
                 )
             task_name = f"part-entry-{p.identity}-{coro.__name__}"
             task = asyncio.create_task(coro(self, p), name=task_name)
             self._participant_tasks[(p.identity, coro)] = task
-            task.add_done_callback(
-                lambda _: self._participant_tasks.pop((p.identity, coro))
-            )
+            task.add_done_callback(lambda _: self._participant_tasks.pop((p.identity, coro)))  # noqa: B023
 
 
 def _apply_auto_subscribe_opts(room: rtc.Room, auto_subscribe: AutoSubscribe) -> None:
@@ -279,12 +336,8 @@ def _apply_auto_subscribe_opts(room: rtc.Room, auto_subscribe: AutoSubscribe) ->
 
     def _subscribe_if_needed(pub: rtc.RemoteTrackPublication):
         if (
-            auto_subscribe == AutoSubscribe.AUDIO_ONLY
-            and pub.kind == rtc.TrackKind.KIND_AUDIO
-        ) or (
-            auto_subscribe == AutoSubscribe.VIDEO_ONLY
-            and pub.kind == rtc.TrackKind.KIND_VIDEO
-        ):
+            auto_subscribe == AutoSubscribe.AUDIO_ONLY and pub.kind == rtc.TrackKind.KIND_AUDIO
+        ) or (auto_subscribe == AutoSubscribe.VIDEO_ONLY and pub.kind == rtc.TrackKind.KIND_VIDEO):
             pub.set_subscribed(True)
 
     for p in room.remote_participants.values():
@@ -300,11 +353,17 @@ class JobProcess:
     def __init__(
         self,
         *,
+        executor_type: JobExecutorType,
         user_arguments: Any | None = None,
     ) -> None:
+        self._executor_type = executor_type
         self._mp_proc = mp.current_process()
         self._userdata: dict[str, Any] = {}
         self._user_arguments = user_arguments
+
+    @property
+    def executor_type(self) -> JobExecutorType:
+        return self._executor_type
 
     @property
     def pid(self) -> int | None:
@@ -364,7 +423,7 @@ class JobRequest:
         metadata: str = "",
         attributes: dict[str, str] | None = None,
     ) -> None:
-        """Accept the job request, and start the job if the LiveKit SFU assigns the job to our worker."""
+        """Accept the job request, and start the job if the LiveKit SFU assigns the job to our worker."""  # noqa: E501
         if not identity:
             identity = "agent-" + self.id
 

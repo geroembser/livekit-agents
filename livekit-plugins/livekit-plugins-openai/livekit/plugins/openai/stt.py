@@ -27,6 +27,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 import httpx
+
+import openai
 from livekit import rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -37,9 +39,11 @@ from livekit.agents import (
     stt,
     utils,
 )
-from livekit.agents.utils import AudioBuffer
-
-import openai
+from livekit.agents.types import (
+    NOT_GIVEN,
+    NotGivenOr,
+)
+from livekit.agents.utils import AudioBuffer, is_given
 from openai.types.audio import TranscriptionVerbose
 from openai.types.beta.realtime.transcription_session_update_param import (
     SessionTurnDetection,
@@ -63,8 +67,8 @@ class _STTOptions:
     language: str
     detect_language: bool
     turn_detection: SessionTurnDetection
-    prompt: str | None = None
-    noise_reduction_type: str | None = None
+    prompt: NotGivenOr[str] = NOT_GIVEN
+    noise_reduction_type: NotGivenOr[str] = NOT_GIVEN
 
 
 class STT(stt.STT):
@@ -73,12 +77,12 @@ class STT(stt.STT):
         *,
         language: str = "en",
         detect_language: bool = False,
-        model: STTModels | str = "gpt-4o-transcribe",
-        prompt: str | None = None,
-        turn_detection: SessionTurnDetection | None = None,
-        noise_reduction_type: str | None = None,
-        base_url: str | None = None,
-        api_key: str | None = None,
+        model: STTModels | str = "gpt-4o-mini-transcribe",
+        prompt: NotGivenOr[str] = NOT_GIVEN,
+        turn_detection: NotGivenOr[SessionTurnDetection] = NOT_GIVEN,
+        noise_reduction_type: NotGivenOr[str] = NOT_GIVEN,
+        base_url: NotGivenOr[str] = NOT_GIVEN,
+        api_key: NotGivenOr[str] = NOT_GIVEN,
         client: openai.AsyncClient | None = None,
         use_realtime: bool = True,
     ):
@@ -97,17 +101,15 @@ class STT(stt.STT):
             base_url: Custom base URL for OpenAI API.
             api_key: Your OpenAI API key. If not provided, will use the OPENAI_API_KEY environment variable.
             client: Optional pre-configured OpenAI AsyncClient instance.
-        """
+        """  # noqa: E501
 
         super().__init__(
-            capabilities=stt.STTCapabilities(
-                streaming=use_realtime, interim_results=use_realtime
-            )
+            capabilities=stt.STTCapabilities(streaming=use_realtime, interim_results=use_realtime)
         )
         if detect_language:
             language = ""
 
-        if turn_detection is None:
+        if not is_given(turn_detection):
             turn_detection = {
                 "type": "server_vad",
                 "threshold": 0.5,
@@ -122,13 +124,13 @@ class STT(stt.STT):
             prompt=prompt,
             turn_detection=turn_detection,
         )
-        if noise_reduction_type is not None:
+        if is_given(noise_reduction_type):
             self._opts.noise_reduction_type = noise_reduction_type
 
         self._client = client or openai.AsyncClient(
             max_retries=0,
-            api_key=api_key,
-            base_url=base_url,
+            api_key=api_key if is_given(api_key) else None,
+            base_url=base_url if is_given(base_url) else None,
             http_client=httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=15.0, read=5.0, write=5.0, pool=5.0),
                 follow_redirects=True,
@@ -152,12 +154,12 @@ class STT(stt.STT):
     def with_groq(
         *,
         model: GroqAudioModels | str = "whisper-large-v3-turbo",
-        api_key: str | None = None,
-        base_url: str | None = "https://api.groq.com/openai/v1",
+        api_key: NotGivenOr[str] = NOT_GIVEN,
+        base_url: NotGivenOr[str] = NOT_GIVEN,
         client: openai.AsyncClient | None = None,
         language: str = "en",
-        prompt: str | None = None,
         detect_language: bool = False,
+        prompt: NotGivenOr[str] = NOT_GIVEN,
     ) -> STT:
         """
         Create a new instance of Groq STT.
@@ -165,14 +167,16 @@ class STT(stt.STT):
         ``api_key`` must be set to your Groq API key, either using the argument or by setting
         the ``GROQ_API_KEY`` environmental variable.
         """
-
-        api_key = api_key or os.environ.get("GROQ_API_KEY")
-        if api_key is None:
+        groq_api_key = api_key if is_given(api_key) else os.environ.get("GROQ_API_KEY")
+        if not groq_api_key:
             raise ValueError("Groq API key is required")
+
+        if not is_given(base_url):
+            base_url = "https://api.groq.com/openai/v1"
 
         return STT(
             model=model,
-            api_key=api_key,
+            api_key=groq_api_key,
             base_url=base_url,
             client=client,
             language=language,
@@ -184,9 +188,9 @@ class STT(stt.STT):
     def stream(
         self,
         *,
-        language: str | None = None,
+        language: NotGivenOr[str] = NOT_GIVEN,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
-    ) -> "SpeechStream":
+    ) -> SpeechStream:
         config = self._sanitize_options(language=language)
         stream = SpeechStream(
             stt=self,
@@ -199,31 +203,36 @@ class STT(stt.STT):
     def update_options(
         self,
         *,
-        model: STTModels | GroqAudioModels | str | None = None,
-        language: str | None = None,
-        prompt: str | None = None,
-        turn_detection: SessionTurnDetection | None = None,
-        noise_reduction_type: str | None = None,
+        model: NotGivenOr[STTModels | GroqAudioModels | str] = NOT_GIVEN,
+        language: NotGivenOr[str] = NOT_GIVEN,
+        prompt: NotGivenOr[str] = NOT_GIVEN,
+        turn_detection: NotGivenOr[SessionTurnDetection] = NOT_GIVEN,
+        noise_reduction_type: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
-        self._opts.model = model or self._opts.model
-        self._opts.language = language or self._opts.language
-        self._opts.prompt = prompt or self._opts.prompt
-        self._opts.noise_reduction_type = (
-            noise_reduction_type or self._opts.noise_reduction_type
-        )
-        self._opts.turn_detection = turn_detection or self._opts.turn_detection
+        if is_given(model):
+            self._opts.model = model
+        if is_given(language):
+            self._opts.language = language
+        if is_given(prompt):
+            self._opts.prompt = prompt
+        if is_given(turn_detection):
+            self._opts.turn_detection = turn_detection
+        if is_given(noise_reduction_type):
+            self._opts.noise_reduction_type = noise_reduction_type
 
         for stream in self._streams:
-            stream.update_options(language=language or self._opts.language)
+            if is_given(language):
+                stream.update_options(language=language)
 
     async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
+        prompt = self._opts.prompt if is_given(self._opts.prompt) else ""
         realtime_config: dict[str, Any] = {
             "type": "transcription_session.update",
             "session": {
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
                     "model": self._opts.model,
-                    "prompt": self._opts.prompt or "",
+                    "prompt": prompt,
                 },
                 "turn_detection": self._opts.turn_detection,
             },
@@ -267,24 +276,23 @@ class STT(stt.STT):
 
         return self._session
 
-    def _sanitize_options(self, *, language: str | None = None) -> _STTOptions:
+    def _sanitize_options(self, *, language: NotGivenOr[str] = NOT_GIVEN) -> _STTOptions:
         config = dataclasses.replace(self._opts)
-        config.language = language or config.language
+        if is_given(language):
+            config.language = language
         return config
 
     async def _recognize_impl(
         self,
         buffer: AudioBuffer,
         *,
-        language: str | None,
+        language: NotGivenOr[str] = NOT_GIVEN,
         conn_options: APIConnectOptions,
     ) -> stt.SpeechEvent:
         try:
             config = self._sanitize_options(language=language)
             data = rtc.combine_audio_frames(buffer).to_wav_bytes()
-            prompt = (
-                self._opts.prompt if self._opts.prompt is not None else openai.NOT_GIVEN
-            )
+            prompt = self._opts.prompt if is_given(self._opts.prompt) else openai.NOT_GIVEN
 
             format = "json"
             if self._opts.model == "whisper-1":
@@ -314,9 +322,9 @@ class STT(stt.STT):
             )
 
         except openai.APITimeoutError:
-            raise APITimeoutError()
+            raise APITimeoutError()  # noqa: B904
         except openai.APIStatusError as e:
-            raise APIStatusError(
+            raise APIStatusError(  # noqa: B904
                 e.message,
                 status_code=e.status_code,
                 request_id=e.request_id,
@@ -334,9 +342,7 @@ class SpeechStream(stt.SpeechStream):
         opts: _STTOptions,
         pool: utils.ConnectionPool[aiohttp.ClientWebSocketResponse],
     ) -> None:
-        super().__init__(
-            stt=stt, conn_options=DEFAULT_API_CONNECT_OPTIONS, sample_rate=SAMPLE_RATE
-        )
+        super().__init__(stt=stt, conn_options=DEFAULT_API_CONNECT_OPTIONS, sample_rate=SAMPLE_RATE)
 
         self._pool = pool
         self._opts = opts
@@ -346,7 +352,7 @@ class SpeechStream(stt.SpeechStream):
     def update_options(
         self,
         *,
-        language: str | None = None,
+        language: str,
     ):
         """
         Update the options for the speech stream. Most options are updated at the
@@ -355,7 +361,7 @@ class SpeechStream(stt.SpeechStream):
         Args:
             language: The language to transcribe in.
         """
-        self._opts.language = language or self._opts.language
+        self._opts.language = language
         self._reconnect_event.set()
 
     @utils.log_exceptions(logger=logger)
@@ -421,10 +427,7 @@ class SpeechStream(stt.SpeechStream):
                         delta = data.get("delta", "")
                         if delta:
                             current_text += delta
-                            if (
-                                time.time() - last_interim_at
-                                > _delta_transcript_interval
-                            ):
+                            if time.time() - last_interim_at > _delta_transcript_interval:
                                 self._event_ch.send_nowait(
                                     stt.SpeechEvent(
                                         type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
@@ -437,10 +440,7 @@ class SpeechStream(stt.SpeechStream):
                                     )
                                 )
                                 last_interim_at = time.time()
-                    elif (
-                        msg_type
-                        == "conversation.item.input_audio_transcription.completed"
-                    ):
+                    elif msg_type == "conversation.item.input_audio_transcription.completed":
                         current_text = ""
                         transcript = data.get("transcript", "")
                         if transcript:
