@@ -30,7 +30,7 @@ from .llm.chat_context import (
     FunctionCall,
     FunctionCallOutput,
 )
-from .llm.tool_context import FunctionTool, function_tool
+from .llm.tool_context import FunctionTool, function_tool, StopResponse, ToolError
 from .plugin import Plugin
 from .types import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -44,7 +44,7 @@ from .version import __version__
 from .voice import Agent, AgentEvent, AgentSession, ModelSettings, RunContext, io
 from .voice.background_audio import AudioConfig, BackgroundAudioPlayer, BuiltinAudioClip
 from .voice.room_io import RoomInputOptions, RoomIO, RoomOutputOptions
-from .worker import Worker, WorkerOptions, WorkerPermissions, WorkerType
+from .worker import SimulateJobInfo, Worker, WorkerOptions, WorkerPermissions, WorkerType
 
 __all__ = [
     "__version__",
@@ -72,13 +72,14 @@ __all__ = [
     "io",
     "FunctionCall",
     "FunctionCallOutput",
+    "StopResponse",
+    "ToolError",
     "RunContext",
     "Plugin",
     "AgentSession",
     "AgentEvent",
     "ModelSettings",
     "Agent",
-    "cli",
     "AssignmentTimeoutError",
     "APIConnectionError",
     "APIError",
@@ -93,6 +94,7 @@ __all__ = [
     "BackgroundAudioPlayer",
     "BuiltinAudioClip",
     "AudioConfig",
+    "SimulateJobInfo",
 ]
 
 # Cleanup docs of unexported modules
