@@ -163,7 +163,7 @@ class RealtimeModel(llm.RealtimeModel):
         *,
         voice: NotGivenOr[str] = NOT_GIVEN,
         temperature: NotGivenOr[float] = NOT_GIVEN,
-        turn_detection: NotGivenOr[TurnDetection] = NOT_GIVEN,
+        turn_detection: NotGivenOr[TurnDetection | None] = NOT_GIVEN,
         tool_choice: NotGivenOr[llm.ToolChoice | None] = NOT_GIVEN,
     ) -> None:
         if is_given(voice):
@@ -468,7 +468,7 @@ class RealtimeSession(
         tool_choice: NotGivenOr[llm.ToolChoice | None] = NOT_GIVEN,
         voice: NotGivenOr[str] = NOT_GIVEN,
         temperature: NotGivenOr[float] = NOT_GIVEN,
-        turn_detection: NotGivenOr[TurnDetection] = NOT_GIVEN,
+        turn_detection: NotGivenOr[TurnDetection | None] = NOT_GIVEN,
     ) -> None:
         kwargs = {}
 
@@ -597,6 +597,9 @@ class RealtimeSession(
                     )
                 )
                 self._pushed_duration_s += nf.duration
+
+    def push_video(self, frame: rtc.VideoFrame) -> None:
+        pass
 
     def commit_audio(self) -> None:
         if self._pushed_duration_s > 0.1:  # OpenAI requires at least 100ms of audio
