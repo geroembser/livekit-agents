@@ -18,6 +18,10 @@ from ..llm import (
     ToolError,
     utils as llm_utils,
 )
+from ..llm.tool_context import (
+    is_function_tool,
+    is_raw_function_tool,
+)
 from ..log import logger
 from ..types import NotGivenOr
 from ..utils import aio
@@ -47,7 +51,7 @@ def perform_llm_inference(
     *,
     node: io.LLMNode,
     chat_ctx: ChatContext,
-    tool_ctx: ToolContext | None,
+    tool_ctx: ToolContext,
     model_settings: ModelSettings,
 ) -> tuple[asyncio.Task, _LLMGenerationData]:
     text_ch = aio.Chan()
@@ -57,13 +61,17 @@ def perform_llm_inference(
 
     @utils.log_exceptions(logger=logger)
     async def _inference_task():
+        tools = list(tool_ctx.function_tools.values())
         llm_node = node(
             chat_ctx,
-            list(tool_ctx.function_tools.values()) if tool_ctx is not None else [],
+            tools,
             model_settings,
         )
         if asyncio.iscoroutine(llm_node):
             llm_node = await llm_node
+
+        # update the tool context after llm node
+        tool_ctx.update_tools(tools)
 
         if isinstance(llm_node, str):
             data.generated_text = llm_node
@@ -311,10 +319,26 @@ async def _execute_tools_task(
                 )
                 continue
 
+            if not is_function_tool(function_tool) and not is_raw_function_tool(function_tool):
+                logger.error(
+                    f"unknown tool type: {type(function_tool)}",
+                    extra={
+                        "function": fnc_call.name,
+                        "speech_id": speech_handle.id,
+                    },
+                )
+                continue
+
             try:
-                function_model = llm_utils.function_arguments_to_pydantic_model(function_tool)
                 json_args = fnc_call.arguments or "{}"
-                parsed_args = function_model.model_validate_json(json_args)
+                fnc_args, fnc_kwargs = llm_utils.prepare_function_arguments(
+                    fnc=function_tool,
+                    json_arguments=json_args,
+                    call_ctx=RunContext(
+                        session=session, speech_handle=speech_handle, function_call=fnc_call
+                    ),
+                )
+
             except ValidationError:
                 logger.exception(
                     f"tried to call AI function `{fnc_call.name}` with invalid arguments",
@@ -338,26 +362,27 @@ async def _execute_tools_task(
                 },
             )
 
-            fnc_args, fnc_kwargs = llm_utils.pydantic_model_to_function_arguments(
-                model=parsed_args,
-                function_tool=function_tool,
-                call_ctx=RunContext(
-                    session=session, speech_handle=speech_handle, function_call=fnc_call
-                ),
-            )
+            py_out = _PythonOutput(fnc_call=fnc_call, output=None, exception=None)
+            try:
+                task = asyncio.create_task(
+                    function_tool(*fnc_args, **fnc_kwargs),
+                    name=f"function_tool_{fnc_call.name}",
+                )
 
-            py_out = _PythonOutput(
-                fnc_call=fnc_call,
-                output=None,
-                exception=None,
-            )
-
-            task = asyncio.create_task(
-                function_tool(*fnc_args, **fnc_kwargs),
-                name=f"function_tool_{fnc_call.name}",
-            )
-            tasks.append(task)
-            _authorize_inline_task(task, function_call=fnc_call)
+                tasks.append(task)
+                _authorize_inline_task(task, function_call=fnc_call)
+            except Exception:
+                # catching exceptions here because even though the function is asynchronous,
+                # errors such as missing or incompatible arguments can still occur at
+                # invocation time.
+                logger.exception(
+                    "exception occurred while executing tool",
+                    extra={
+                        "function": fnc_call.name,
+                        "speech_id": speech_handle.id,
+                    },
+                )
+                continue
 
             def _log_exceptions(
                 task: asyncio.Task,
@@ -600,24 +625,3 @@ def remove_instructions(chat_ctx: ChatContext) -> None:
             chat_ctx.items.remove(msg)
         else:
             break
-
-
-STANDARD_SPEECH_RATE = 0.5  # words per second
-
-
-def truncate_message(*, message: str, played_duration: float) -> str:
-    # TODO(theomonnom): this is very naive
-    from ..tokenize import _basic_word
-
-    words = _basic_word.split_words(message, ignore_punctuation=False)
-    total_duration = len(words) * STANDARD_SPEECH_RATE
-
-    if total_duration <= played_duration:
-        return message
-
-    max_words = int(played_duration // STANDARD_SPEECH_RATE)
-    if max_words < 1:
-        return ""
-
-    _, _, end_pos = words[max_words - 1]
-    return message[:end_pos]
