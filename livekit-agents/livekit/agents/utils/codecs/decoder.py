@@ -15,6 +15,7 @@
 import asyncio
 import contextlib
 import io
+import struct
 import threading
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -92,14 +93,9 @@ class AudioStreamDecoder:
     _max_workers: int = 10
     _executor: Optional[ThreadPoolExecutor] = None
 
-    def __init__(self, *, sample_rate: int = 48000, num_channels: int = 1, format: Optional[str] = None):
-        try:
-            import av  # noqa
-        except ImportError:
-            raise ImportError(
-                "You haven't included the 'codecs' optional dependencies. Please install the 'codecs' extra by running `pip install livekit-agents[codecs]`"
-            )
-
+    def __init__(
+        self, *, sample_rate: int = 48000, num_channels: int = 1, format: Optional[str] = None
+    ):
         self._sample_rate = sample_rate
         self._num_channels = num_channels
         self._format = format
@@ -108,6 +104,7 @@ class AudioStreamDecoder:
             self._layout = "stereo"
         elif num_channels != 1:
             raise ValueError(f"Invalid number of channels: {num_channels}")
+        self._format = format.lower() if format else None
 
         self._output_ch = aio.Chan[rtc.AudioFrame]()
         self._closed = False
@@ -123,7 +120,12 @@ class AudioStreamDecoder:
         self._input_buf.write(chunk)
         if not self._started:
             self._started = True
-            self._loop.run_in_executor(self.__class__._executor, self._decode_loop)
+            # choose decode loop based on format
+            if self._format == "wav":
+                target = self._decode_wav_loop
+            else:
+                target = self._decode_loop
+            self._loop.run_in_executor(self.__class__._executor, target)
 
     def end_input(self):
         self._input_buf.end_input()
@@ -148,15 +150,28 @@ class AudioStreamDecoder:
                 )
             else:
                 # Default behavior - auto-detect format
-                container = av.open(self._input_buf)
-
-            audio_stream = next(s for s in container.streams if s.type == "audio")
-            resampler = av.AudioResampler(
-                # convert to signed 16-bit little endian
-                format="s16",
-                layout=self._layout,
-                rate=self._sample_rate,
+                # open container in low-latency streaming mode
+                container = av.open(
+                    self._input_buf,
+                    mode="r",
+                    buffer_size=1024,
+                    options={
+                        "fflags": "nobuffer+flush_packets",
+                        "probesize": "32",
+                        "analyzeduration": "0",
+                        "max_delay": "0",
+                    },
+                )
+            # explicitly disable internal buffering flags on the FFmpeg container
+            container.flags |= (
+                av.container.Flags.no_buffer.value | av.container.Flags.flush_packets.value
             )
+            if len(container.streams.audio) == 0:
+                raise ValueError("no audio stream found")
+
+            audio_stream = container.streams.audio[0]
+            resampler = av.AudioResampler(format="s16", layout=self._layout, rate=self._sample_rate)
+
             # TODO: handle error where audio stream isn't found
             if not audio_stream:
                 return
@@ -182,6 +197,92 @@ class AudioStreamDecoder:
             self._loop.call_soon_threadsafe(self._output_ch.close)
             if container:
                 container.close()
+
+    def _decode_wav_loop(self):
+        """Decode wav data from the buffer without ffmpeg, parse header and emit PCM frames.
+
+        This can be much faster than using ffmpeg, as we are emitting frames as quickly as possible.
+        """
+
+        try:
+            from livekit.agents.utils.audio import AudioByteStream
+
+            # parse RIFF header
+            header = b""
+            while len(header) < 12:
+                chunk = self._input_buf.read(12 - len(header))
+                if not chunk:
+                    raise ValueError("Invalid WAV file: incomplete header")
+                header += chunk
+            if header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+                raise ValueError(f"Invalid WAV file: missing RIFF/WAVE: {header}")
+
+            # parse fmt chunk
+            while True:
+                sub_header = self._input_buf.read(8)
+                if len(sub_header) < 8:
+                    raise ValueError("Invalid WAV file: incomplete fmt chunk header")
+                chunk_id, chunk_size = struct.unpack("<4sI", sub_header)
+                data = b""
+                remaining = chunk_size
+                while remaining > 0:
+                    part = self._input_buf.read(min(1024, remaining))
+                    if not part:
+                        raise ValueError("Invalid WAV file: incomplete fmt chunk data")
+                    data += part
+                    remaining -= len(part)
+                if chunk_id == b"fmt ":
+                    audio_format, wave_channels, wave_rate, _, _, bits_per_sample = struct.unpack(
+                        "<HHIIHH", data[:16]
+                    )
+                    if audio_format != 1:
+                        raise ValueError(f"Unsupported WAV audio format: {audio_format}")
+                    break
+
+            # parse data chunk
+            while True:
+                sub_header = self._input_buf.read(8)
+                if len(sub_header) < 8:
+                    raise ValueError("Invalid WAV file: incomplete data chunk header")
+                chunk_id, chunk_size = struct.unpack("<4sI", sub_header)
+                if chunk_id == b"data":
+                    break
+
+                # skip chunk data
+                to_skip = chunk_size
+                while to_skip > 0:
+                    skipped = self._input_buf.read(min(1024, to_skip))
+                    if not skipped:
+                        raise ValueError("Invalid WAV file: incomplete chunk while seeking data")
+                    to_skip -= len(skipped)
+
+            # now ready to decode
+            bstream = AudioByteStream(sample_rate=wave_rate, num_channels=wave_channels)
+            resampler = rtc.AudioResampler(
+                input_rate=wave_rate, output_rate=self._sample_rate, num_channels=wave_channels
+            )
+
+            def resample_and_push(frame: rtc.AudioFrame):
+                for resampled_frame in resampler.push(frame):
+                    self._loop.call_soon_threadsafe(
+                        self._output_ch.send_nowait,
+                        resampled_frame,
+                    )
+
+            while True:
+                chunk = self._input_buf.read(1024)
+                if not chunk:
+                    break
+                frames = bstream.push(chunk)
+                for rtc_frame in frames:
+                    resample_and_push(rtc_frame)
+
+            for rtc_frame in bstream.flush():
+                resample_and_push(rtc_frame)
+        except Exception:
+            logger.exception("error decoding wav")
+        finally:
+            self._loop.call_soon_threadsafe(self._output_ch.close)
 
     def __aiter__(self) -> AsyncIterator[rtc.AudioFrame]:
         return self
