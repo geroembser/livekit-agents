@@ -39,6 +39,11 @@ from .langs import TTSLangs
 from .log import logger
 from .models import ArcanaVoices, TTSModels
 
+# arcana can take as long as 80% of the total duration of the audio it's synthesizing.
+ARCANA_MODEL_TIMEOUT = 60 * 4
+MISTV2_MODEL_TIMEOUT = 30
+RIME_BASE_URL = "https://users.rime.ai/v1/rime-tts"
+
 
 @dataclass
 class _TTSOptions:
@@ -66,9 +71,6 @@ class _Mistv2Options:
     phonemize_between_brackets: NotGivenOr[bool] = NOT_GIVEN
 
 
-DEFAULT_API_URL = "https://users.rime.ai/v1/rime-tts"
-
-
 NUM_CHANNELS = 1
 
 
@@ -76,6 +78,7 @@ class TTS(tts.TTS):
     def __init__(
         self,
         *,
+        base_url: str = RIME_BASE_URL,
         model: TTSModels | str = "arcana",
         speaker: NotGivenOr[ArcanaVoices | str] = NOT_GIVEN,
         # Arcana options
@@ -133,6 +136,9 @@ class TTS(tts.TTS):
                 phonemize_between_brackets=phonemize_between_brackets,
             )
         self._session = http_session
+        self._base_url = base_url
+
+        self._total_timeout = ARCANA_MODEL_TIMEOUT if model == "arcana" else MISTV2_MODEL_TIMEOUT
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if not self._session:
@@ -155,6 +161,7 @@ class TTS(tts.TTS):
             session=self._ensure_session(),
             segment_id=segment_id if is_given(segment_id) else None,
             api_key=self._api_key,
+            total_timout=self._total_timeout,
         )
 
     def update_options(
@@ -181,12 +188,14 @@ class ChunkedStream(tts.ChunkedStream):
         session: aiohttp.ClientSession,
         conn_options: APIConnectOptions,
         segment_id: NotGivenOr[str] = NOT_GIVEN,
+        total_timout: int = MISTV2_MODEL_TIMEOUT,
     ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._opts = opts
         self._session = session
         self._segment_id = segment_id if is_given(segment_id) else utils.shortuuid()
         self._api_key = api_key
+        self._total_timeout = total_timout
 
     async def _run(self) -> None:
         request_id = utils.shortuuid()
@@ -236,10 +245,13 @@ class ChunkedStream(tts.ChunkedStream):
         decode_task: asyncio.Task | None = None
         try:
             async with self._session.post(
-                DEFAULT_API_URL,
+                self._tts._base_url,
                 headers=headers,
                 json=payload,
-                timeout=self._conn_options.timeout,
+                timeout=aiohttp.ClientTimeout(
+                    connect=self._conn_options.timeout,
+                    total=self._total_timeout,
+                ),
             ) as response:
                 if not response.content_type.startswith("audio"):
                     content = await response.text()

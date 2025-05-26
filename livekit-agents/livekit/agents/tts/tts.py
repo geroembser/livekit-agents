@@ -44,7 +44,7 @@ class TTSError(BaseModel):
     type: Literal["tts_error"] = "tts_error"
     timestamp: float
     label: str
-    error: APIError = Field(..., exclude=True)
+    error: Exception = Field(..., exclude=True)
     recoverable: bool
 
 
@@ -92,10 +92,12 @@ class TTS(
         self,
         text: str,
         *,
-        conn_options: APIConnectOptions | None = None,
+        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> ChunkedStream: ...
 
-    def stream(self, *, conn_options: APIConnectOptions | None = None) -> SynthesizeStream:
+    def stream(
+        self, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
+    ) -> SynthesizeStream:
         raise NotImplementedError(
             "streaming is not supported by this TTS, please use a different TTS or use a StreamAdapter"  # noqa: E501
         )
@@ -227,7 +229,11 @@ class ChunkedStream(ABC):
                 # Reset the flag when retrying
                 self._current_attempt_has_error = False
 
-    def _emit_error(self, api_error: APIError, recoverable: bool):
+            except Exception as e:
+                self._emit_error(e, recoverable=False)
+                raise
+
+    def _emit_error(self, api_error: Exception, recoverable: bool) -> None:
         self._current_attempt_has_error = True
         self._tts.emit(
             "error",
@@ -284,7 +290,7 @@ class SynthesizeStream(ABC):
 
         self._task = asyncio.create_task(self._main_task(), name="TTS._main_task")
         self._task.add_done_callback(lambda _: self._event_ch.close())
-        self._metrics_task: asyncio.Task | None = None  # started on first push
+        self._metrics_task: asyncio.Task[None] | None = None  # started on first push
         self._current_attempt_has_error = False
         self._started_time: float = 0
 
@@ -325,7 +331,11 @@ class SynthesizeStream(ABC):
                 # Reset the flag when retrying
                 self._current_attempt_has_error = False
 
-    def _emit_error(self, api_error: APIError, recoverable: bool):
+            except Exception as e:
+                self._emit_error(e, recoverable=False)
+                raise
+
+    def _emit_error(self, api_error: Exception, recoverable: bool) -> None:
         self._current_attempt_has_error = True
         self._tts.emit(
             "error",
@@ -348,7 +358,7 @@ class SynthesizeStream(ABC):
         ttfb = -1.0
         request_id = ""
 
-        def _emit_metrics():
+        def _emit_metrics() -> None:
             nonlocal audio_duration, ttfb, request_id
 
             if not self._started_time or self._current_attempt_has_error:
@@ -484,7 +494,7 @@ class SynthesizedAudioEmitter:
         self._request_id = request_id
         self._segment_id = segment_id
 
-    def push(self, frame: rtc.AudioFrame | None):
+    def push(self, frame: rtc.AudioFrame | None) -> None:
         """Emits any buffered frame and stores the new frame for later emission.
 
         The buffered frame is emitted as not final.
@@ -492,7 +502,7 @@ class SynthesizedAudioEmitter:
         self._emit_frame(is_final=False)
         self._frame = frame
 
-    def _emit_frame(self, is_final: bool = False):
+    def _emit_frame(self, is_final: bool = False) -> None:
         """Sends the buffered frame to the event channel if one exists."""
         if self._frame is None:
             return
@@ -506,6 +516,6 @@ class SynthesizedAudioEmitter:
         )
         self._frame = None
 
-    def flush(self):
+    def flush(self) -> None:
         """Emits any buffered frame as final."""
         self._emit_frame(is_final=True)
