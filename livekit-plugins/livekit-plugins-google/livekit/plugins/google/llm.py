@@ -73,6 +73,7 @@ class LLM(llm.LLM):
         frequency_penalty: NotGivenOr[float] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         thinking_config: NotGivenOr[types.ThinkingConfigOrDict] = NOT_GIVEN,
+        base_url: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
         """
         Create a new instance of Google GenAI LLM.
@@ -163,6 +164,7 @@ class LLM(llm.LLM):
             vertexai=use_vertexai,
             project=gcp_project,
             location=gcp_location,
+            http_options={"base_url": base_url} if is_given(base_url) else None,
         )
 
     def chat(
