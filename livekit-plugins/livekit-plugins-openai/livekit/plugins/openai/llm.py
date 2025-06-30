@@ -85,6 +85,7 @@ class LLM(llm.LLM):
         metadata: NotGivenOr[dict[str, str]] = NOT_GIVEN,
         max_completion_tokens: NotGivenOr[int] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
+        bearer_auth: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
         """
         Create a new instance of OpenAI LLM.
@@ -108,6 +109,7 @@ class LLM(llm.LLM):
             base_url=base_url if is_given(base_url) else None,
             max_retries=0,
             http_client=httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {bearer_auth}"} if is_given(bearer_auth) else {},
                 timeout=timeout
                 if timeout
                 else httpx.Timeout(connect=15.0, read=5.0, write=5.0, pool=5.0),
