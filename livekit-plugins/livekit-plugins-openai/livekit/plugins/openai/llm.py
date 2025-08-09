@@ -102,6 +102,7 @@ class LLM(llm.LLM):
         service_tier: NotGivenOr[str] = NOT_GIVEN,
         reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
         verbosity: NotGivenOr[Verbosity] = NOT_GIVEN,
+        bearer_auth: NotGivenOr[str] = NOT_GIVEN,
         _provider_fmt: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
         """
