@@ -1,15 +1,16 @@
 import logging
+from collections.abc import AsyncIterable
 
 from dotenv import load_dotenv
 
+from livekit import rtc
 from livekit.agents import (
-    NOT_GIVEN,
     Agent,
-    AgentFalseInterruptionEvent,
     AgentSession,
     JobContext,
     JobProcess,
     MetricsCollectedEvent,
+    ModelSettings,
     RoomInputOptions,
     RoomOutputOptions,
     RunContext,
@@ -35,13 +36,25 @@ class MyAgent(Agent):
             instructions="Your name is Kelly. You would interact with users via voice."
             "with that in mind keep your responses concise and to the point."
             "do not use emojis, asterisks, markdown, or other special characters in your responses."
-            "You are curious and friendly, and have a sense of humor.",
+            "You are curious and friendly, and have a sense of humor."
+            "you will speak english to the user",
         )
 
     async def on_enter(self):
         # when the agent is added to the session, it'll generate a reply
         # according to its instructions
         self.session.generate_reply()
+
+    async def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ) -> AsyncIterable[rtc.AudioFrame]:
+        # Markdown and emoji filters are enabled in `Agent.tts_node`, markdown symbols
+        # and emojis will be removed from the text sent to the TTS model
+
+        # To disable these filters, customize the `tts_node` method and
+        # use `return Agent.default.tts_node(self, text, model_settings)` instead
+
+        return super().tts_node(text, model_settings)
 
     # all functions annotated with @function_tool will be passed to the LLM when this
     # agent is active
@@ -83,19 +96,17 @@ async def entrypoint(ctx: JobContext):
         tts=openai.TTS(voice="ash"),
         # allow the LLM to generate a response while waiting for the end of turn
         preemptive_generation=True,
+        # sometimes background noise could interrupt the agent session, these are considered false positive interruptions
+        # when it's detected, you may resume the agent's speech
+        resume_false_interruption=True,
+        false_interruption_timeout=1.0,
+        min_interruption_duration=0.2,  # with false interruption resume, interruption can be more sensitive
         # use LiveKit's turn detection model
         turn_detection=MultilingualModel(),
     )
 
     # log metrics as they are emitted, and total usage after session is over
     usage_collector = metrics.UsageCollector()
-
-    # sometimes background noise could interrupt the agent session, these are considered false positive interruptions
-    # when it's detected, you may resume the agent's speech
-    @session.on("agent_false_interruption")
-    def _on_agent_false_interruption(ev: AgentFalseInterruptionEvent):
-        logger.info("false positive interruption, resuming")
-        session.generate_reply(instructions=ev.extra_instructions or NOT_GIVEN)
 
     @session.on("metrics_collected")
     def _on_metrics_collected(ev: MetricsCollectedEvent):
