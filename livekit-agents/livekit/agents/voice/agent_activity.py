@@ -2181,14 +2181,15 @@ class AgentActivity(RecognitionHooks):
                         forwarded_text = ""
                         playback_position = 0
 
-                    # truncate server-side message
-                    msg_modalities = await msg_gen.modalities
-                    self._rt_session.truncate(
-                        message_id=msg_gen.message_id,
-                        modalities=msg_modalities,
-                        audio_end_ms=int(playback_position * 1000),
-                        audio_transcript=forwarded_text,
-                    )
+                    # truncate server-side message (if supported)
+                    if self.llm.capabilities.message_truncation:
+                        msg_modalities = await msg_gen.modalities
+                        self._rt_session.truncate(
+                            message_id=msg_gen.message_id,
+                            modalities=msg_modalities,
+                            audio_end_ms=int(playback_position * 1000),
+                            audio_transcript=forwarded_text,
+                        )
 
                 msg: llm.ChatMessage | None = None
                 if forwarded_text:
@@ -2292,6 +2293,18 @@ class AgentActivity(RecognitionHooks):
                 draining = True
 
             if len(new_fnc_outputs) > 0:
+                # wait all speeches played before updating the tool output and generating the response
+                # most realtime models dont't support generating multiple responses at the same time
+                while self._current_speech or self._speech_q:
+                    if (
+                        self._current_speech
+                        and not self._current_speech.done()
+                        and self._current_speech is not speech_handle
+                    ):
+                        await self._current_speech
+                    else:
+                        await asyncio.sleep(0)
+
                 chat_ctx = self._rt_session.chat_ctx.copy()
                 chat_ctx.items.extend(new_fnc_outputs)
                 try:

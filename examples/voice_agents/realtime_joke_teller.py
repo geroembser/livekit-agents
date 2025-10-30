@@ -35,6 +35,8 @@ from livekit.agents import (
     RoomOutputOptions,
     RunContext,
     ToolError,
+    WorkerOptions,
+    cli,
     llm,
 )
 from livekit.agents.llm import function_tool
@@ -137,7 +139,8 @@ async def tell_joke(category: list[str] | None = None) -> dict[str, Any]:
             Available categories are: Any, Misc, Programming, Dark, Pun, Spooky, Christmas
     """
     j = await Jokes()
-    joke = await j.get_joke(category=category if category is not None else ["Any"])
+    # Use safe_mode=True to ensure jokes are appropriate for all ages
+    joke = await j.get_joke(category=category if category is not None else ["Pun"], safe_mode=True)
     if joke["type"] == "single":
         return {"joke": joke["joke"]}
     else:
@@ -260,4 +263,4 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
-    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

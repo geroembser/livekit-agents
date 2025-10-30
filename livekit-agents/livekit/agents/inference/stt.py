@@ -250,7 +250,7 @@ class STT(stt.STT):
 
     @property
     def provider(self) -> str:
-        return "LiveKit"
+        return "livekit"
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if not self._session:
@@ -335,12 +335,11 @@ class SpeechStream(stt.SpeechStream):
             self._opts.model = model
         if is_given(language):
             self._opts.language = language
+        self._reconnect_event.set()
 
     async def _run(self) -> None:
         """Main loop for streaming transcription."""
         closing_ws = False
-
-        self._reconnect_event.set()
 
         @utils.log_exceptions(logger=logger)
         async def send_task(ws: aiohttp.ClientWebSocketResponse) -> None:
