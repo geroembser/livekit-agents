@@ -447,6 +447,9 @@ class _ParticipantStreamTranscriptionOutput:
                     if writer:
                         await writer.aclose(attributes=attributes)
                 else:
+                    # we need to reset the id before flushing non-delta stream (otherwise the attributes will be lost, at least for the react useTranscription hook)
+                    self._current_id = utils.shortuuid("SG_")
+
                     tmp_writer = await self._create_text_writer(attributes=attributes)
                     await tmp_writer.write(self._latest_text)
                     await tmp_writer.aclose()
