@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from enum import Enum, unique
 from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeVar, Union
 
@@ -86,6 +87,7 @@ EventTypes = Literal[
     "agent_state_changed",
     "user_input_transcribed",
     "conversation_item_added",
+    "agent_action",
     "agent_false_interruption",
     "function_tools_executed",
     "metrics_collected",
@@ -152,6 +154,21 @@ class _TypeDiscriminator(BaseModel):
 class ConversationItemAddedEvent(BaseModel):
     type: Literal["conversation_item_added"] = "conversation_item_added"
     item: ChatMessage | _TypeDiscriminator
+    created_at: float = Field(default_factory=time.time)
+
+
+class AgentAction(BaseModel):
+    action_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    kind: str
+    created_at: float = Field(default_factory=time.time)
+    completed_at: float | None = None
+    error: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AgentActionEvent(BaseModel):
+    type: Literal["agent_action"] = "agent_action"
+    action: AgentAction
     created_at: float = Field(default_factory=time.time)
 
 
@@ -233,6 +250,7 @@ AgentEvent = Annotated[
         AgentFalseInterruptionEvent,
         MetricsCollectedEvent,
         ConversationItemAddedEvent,
+        AgentActionEvent,
         FunctionToolsExecutedEvent,
         SpeechCreatedEvent,
         ErrorEvent,
