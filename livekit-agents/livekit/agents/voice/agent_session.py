@@ -5,6 +5,7 @@ import copy
 import json
 import time
 from collections.abc import AsyncIterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass
 from types import TracebackType
 from typing import (
@@ -788,14 +789,20 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         if activity is None:
             raise RuntimeError("AgentSession is closing, cannot use say()")
 
-        handle = activity.say(
-            text,
-            audio=audio,
-            allow_interruptions=allow_interruptions,
-            add_to_chat_ctx=add_to_chat_ctx,
-        )
-        if run_state:
-            run_state._watch_handle(handle)
+        # attach to the session span if called outside of the AgentSession
+        use_span: AbstractContextManager[trace.Span | None] = nullcontext()
+        if trace.get_current_span() is trace.INVALID_SPAN and self._session_span is not None:
+            use_span = trace.use_span(self._session_span, end_on_exit=False)
+
+        with use_span:
+            handle = activity.say(
+                text,
+                audio=audio,
+                allow_interruptions=allow_interruptions,
+                add_to_chat_ctx=add_to_chat_ctx,
+            )
+            if run_state:
+                run_state._watch_handle(handle)
 
         return handle
 
@@ -835,14 +842,20 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         if activity is None:
             raise RuntimeError("AgentSession is closing, cannot use generate_reply()")
 
-        handle = activity._generate_reply(
-            user_message=user_message,
-            instructions=instructions,
-            tool_choice=tool_choice,
-            allow_interruptions=allow_interruptions,
-        )
-        if run_state:
-            run_state._watch_handle(handle)
+        # attach to the session span if called outside of the AgentSession
+        use_span: AbstractContextManager[trace.Span | None] = nullcontext()
+        if trace.get_current_span() is trace.INVALID_SPAN and self._session_span is not None:
+            use_span = trace.use_span(self._session_span, end_on_exit=False)
+
+        with use_span:
+            handle = activity._generate_reply(
+                user_message=user_message,
+                instructions=instructions,
+                tool_choice=tool_choice,
+                allow_interruptions=allow_interruptions,
+            )
+            if run_state:
+                run_state._watch_handle(handle)
 
         return handle
 
@@ -915,7 +928,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             self._agent = agent
 
             if new_activity == "start":
-                if agent._activity is not None:
+                previous_agent = self._activity.agent if self._activity else None
+                if agent._activity is not None and (
+                    # allow updating the same agent that is running
+                    agent is not previous_agent or previous_activity != "close"
+                ):
                     raise RuntimeError("cannot start agent: an activity is already running")
 
                 self._next_activity = AgentActivity(agent, self)
@@ -924,6 +941,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                     raise RuntimeError("cannot resume agent: no existing active activity to resume")
 
                 self._next_activity = agent._activity
+
+            if self._root_span_context is not None:
+                # restore the root span context so on_exit, on_enter, and future turns
+                # are direct children of the root span, not nested under a tool call.
+                otel_context.attach(self._root_span_context)
 
             previous_activity_v = self._activity
             if self._activity is not None:
@@ -959,11 +981,6 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
     ) -> None:
         if old_task is not None:
             await old_task
-
-        if self._root_span_context is not None:
-            # restore the root span context so on_exit, on_enter, and future turns
-            # are direct children of the root span, not nested under a tool call.
-            otel_context.attach(self._root_span_context)
 
         await self._update_activity(agent)
 
