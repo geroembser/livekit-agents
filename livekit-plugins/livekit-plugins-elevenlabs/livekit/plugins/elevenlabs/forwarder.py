@@ -1,4 +1,7 @@
 import asyncio
+import logging    
+
+logger = logging.getLogger("elevenlabs-forwarder")
 
 class ElevenlabsForwarder:
     def __init__(self, forward_callback):
@@ -23,7 +26,7 @@ class ElevenlabsForwarder:
             try:
                 await self._forward_callback(data)
             except Exception as e:
-                print(f"Error forwarding data: {e}")
+                logger.error(f"Error forwarding data: {e}")
             self.queue.task_done()
 
     async def start(self):
