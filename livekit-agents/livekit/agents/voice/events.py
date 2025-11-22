@@ -159,6 +159,7 @@ class ConversationItemAddedEvent(BaseModel):
 
 class AgentAction(BaseModel):
     action_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
     kind: str
     created_at: float = Field(default_factory=time.time)
     completed_at: float | None = None
