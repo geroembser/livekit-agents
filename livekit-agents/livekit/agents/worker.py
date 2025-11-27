@@ -277,6 +277,7 @@ class AgentServer(utils.EventEmitter[EventTypes]):
         host: str = "",  # default to all interfaces
         port: int | ServerEnvOption[int] = _default_port,
         http_proxy: NotGivenOr[str | None] = NOT_GIVEN,
+        ping_timeout: float = 60.0,
         multiprocessing_context: Literal["spawn", "forkserver"] = (
             "spawn" if not sys.platform.startswith("linux") else "forkserver"
         ),
@@ -316,6 +317,7 @@ class AgentServer(utils.EventEmitter[EventTypes]):
         self._agent_name = ""
         self._server_type = ServerType.ROOM
         self._id = "unregistered"
+        self._ping_timeout = ping_timeout
 
         # currently only one rtc_session
         self._entrypoint_fnc: Callable[[JobContext], Awaitable[None]] | None = None
@@ -389,6 +391,7 @@ class AgentServer(utils.EventEmitter[EventTypes]):
             prometheus_port=options.prometheus_port if is_given(options.prometheus_port) else None,
             setup_fnc=options.prewarm_fnc,
             load_fnc=options.load_fnc,
+            ping_timeout=options.ping_timeout,
         )
         server.rtc_session(
             options.entrypoint_fnc,
@@ -544,7 +547,7 @@ class AgentServer(utils.EventEmitter[EventTypes]):
                     memory_warn_mb=2000,
                     memory_limit_mb=0,  # no limit
                     ping_interval=5,
-                    ping_timeout=60,
+                    ping_timeout=self._ping_timeout,
                     high_ping_threshold=2.5,
                     mp_ctx=self._mp_ctx,
                     loop=self._loop,
@@ -565,6 +568,7 @@ class AgentServer(utils.EventEmitter[EventTypes]):
                 memory_warn_mb=self._job_memory_warn_mb,
                 memory_limit_mb=self._job_memory_limit_mb,
                 http_proxy=self._http_proxy or None,
+                ping_timeout=self._ping_timeout,
             )
 
             self._previous_status = agent.WorkerStatus.WS_AVAILABLE
