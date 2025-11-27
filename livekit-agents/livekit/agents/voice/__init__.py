@@ -1,7 +1,6 @@
 from . import io, run_result
 from .agent import Agent, AgentTask, ModelSettings
 from .agent_session import AgentSession, VoiceActivityVideoSampler
-from .chat_cli import ChatCLI
 from .events import (
     AgentEvent,
     AgentFalseInterruptionEvent,
@@ -28,7 +27,6 @@ from .speech_handle import SpeechHandle
 from .transcription import TranscriptSynchronizer
 
 __all__ = [
-    "ChatCLI",
     "AgentSession",
     "VoiceActivityVideoSampler",
     "Agent",
