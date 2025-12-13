@@ -101,6 +101,7 @@ class TTS(tts.TTS):
         forwarder: ElevenlabsForwarder | None = None,
         sync_alignment: bool = True,
         preferred_alignment: Literal["normalized", "original"] = "normalized",
+        timestamps_for_non_websockets: bool = False,
     ) -> None:
         """
         Create a new instance of ElevenLabs TTS.
@@ -122,6 +123,7 @@ class TTS(tts.TTS):
             language (NotGivenOr[str]): Language code for the TTS model, as of 10/24/24 only valid for "eleven_turbo_v2_5".
             sync_alignment (bool): Enable sync alignment for the TTS model. Defaults to True.
             preferred_alignment (Literal["normalized", "original"]): Use normalized or original alignment. Defaults to "normalized".
+            timestamps_for_non_websockets (bool): Use the /with-timestamps endpoint for non-websocket synthesis to get alignment data. Defaults to False.
         """  # noqa: E501
 
         if not is_given(encoding):
@@ -176,6 +178,7 @@ class TTS(tts.TTS):
             apply_text_normalization=apply_text_normalization,
             preferred_alignment=preferred_alignment,
             forwarder=forwarder,
+            timestamps_for_non_websockets=timestamps_for_non_websockets,
         )
         self._session = http_session
         self._streams = weakref.WeakSet[SynthesizeStream]()
@@ -308,21 +311,70 @@ class ChunkedStream(tts.ChunkedStream):
             ) as resp:
                 resp.raise_for_status()
 
-                if not resp.content_type.startswith("audio/"):
-                    content = await resp.text()
-                    raise APIError(message="11labs returned non-audio data", body=content)
+                if self._opts.timestamps_for_non_websockets:
+                    # Handle JSON response with timestamps
+                    content = await resp.json()
+                    
+                    # Forward alignment data to forwarder if available
+                    forwarder = self._tts._opts.forwarder
+                    if forwarder is not None:
+                        forward_data = {
+                            "isFinal": False,
+                            "alignment": {
+                                "charStartTimesMs": [int(float(s)*1000) for s in content.get("alignment", {}).get("character_start_times_seconds", [])],
+                                "charDurationsMs": [int((float(d) - float(content.get("alignment", {}).get("character_start_times_seconds", [])[i]))*1000) for i, d in enumerate(content.get("alignment", {}).get("character_end_times_seconds", []))],
+                                "chars": content.get("alignment", {}).get("characters")
+                            },
+                            "normalizedAlignment": {
+                                "charStartTimesMs": [int(float(s)*1000) for s in content.get("normalized_alignment", {}).get("character_start_times_seconds", [])],
+                                "charDurationsMs": [int((float(d) - float(content.get("normalized_alignment", {}).get("character_start_times_seconds", [])[i]))*1000) for i, d in enumerate(content.get("normalized_alignment", {}).get("character_end_times_seconds", []))],
+                                "chars": content.get("normalized_alignment", {}).get("characters")
+                            }
+                        }
+                        # Convert to JSON string format similar to websocket messages
+                        forwarder.add_data(json.dumps(forward_data))
 
-                output_emitter.initialize(
-                    request_id=utils.shortuuid(),
-                    sample_rate=self._opts.sample_rate,
-                    num_channels=1,
-                    mime_type="audio/mp3",
-                )
+                        # forward final message
+                        final_forward_data = {
+                            "isFinal": True,
+                            "alignment": None,
+                            "normalizedAlignment": None
+                        }
+                        forwarder.add_data(json.dumps(final_forward_data))
+                    
+                    # Decode base64 audio
+                    audio_base64 = content.get("audio_base64")
+                    if not audio_base64:
+                        raise APIError(message="11labs returned no audio_base64 in response", body=str(content))
+                    
+                    audio_data = base64.b64decode(audio_base64)
+                    
+                    output_emitter.initialize(
+                        request_id=utils.shortuuid(),
+                        sample_rate=self._opts.sample_rate,
+                        num_channels=1,
+                        mime_type="audio/mp3",
+                    )
+                    
+                    output_emitter.push(audio_data)
+                    output_emitter.flush()
+                else:
+                    # Original streaming audio handling
+                    if not resp.content_type.startswith("audio/"):
+                        content = await resp.text()
+                        raise APIError(message="11labs returned non-audio data", body=content)
 
-                async for data, _ in resp.content.iter_chunks():
-                    output_emitter.push(data)
+                    output_emitter.initialize(
+                        request_id=utils.shortuuid(),
+                        sample_rate=self._opts.sample_rate,
+                        num_channels=1,
+                        mime_type="audio/mp3",
+                    )
 
-                output_emitter.flush()
+                    async for data, _ in resp.content.iter_chunks():
+                        output_emitter.push(data)
+
+                    output_emitter.flush()
 
         except asyncio.TimeoutError as e:
             raise APITimeoutError() from e
@@ -470,6 +522,7 @@ class _TTSOptions:
     preferred_alignment: Literal["normalized", "original"]
     auto_mode: NotGivenOr[bool]
     forwarder: ElevenlabsForwarder | None
+    timestamps_for_non_websockets: bool
 
 
 @dataclass
@@ -789,12 +842,17 @@ def _synthesize_url(opts: _TTSOptions) -> str:
     voice_id = opts.voice_id
     model_id = opts.model
     output_format = opts.encoding
-    url = (
-        f"{base_url}/text-to-speech/{voice_id}/stream?"
-        f"model_id={model_id}&output_format={output_format}"
-    )
-    if is_given(opts.streaming_latency):
-        url += f"&optimize_streaming_latency={opts.streaming_latency}"
+    
+    if opts.timestamps_for_non_websockets:
+        # Use the /with-timestamps endpoint
+        url = f"{base_url}/text-to-speech/{voice_id}/with-timestamps"
+    else:
+        url = (
+            f"{base_url}/text-to-speech/{voice_id}/stream?"
+            f"model_id={model_id}&output_format={output_format}"
+        )
+        if is_given(opts.streaming_latency):
+            url += f"&optimize_streaming_latency={opts.streaming_latency}"
     return url
 
 
