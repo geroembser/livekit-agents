@@ -17,11 +17,12 @@
 See https://docs.livekit.io/agents/integrations/tts/cartesia/ for more information.
 """
 
+from .forwarder import CartesiaForwarder
 from .stt import STT
 from .tts import TTS, ChunkedStream
 from .version import __version__
 
-__all__ = ["STT", "TTS", "ChunkedStream", "__version__"]
+__all__ = ["STT", "TTS", "ChunkedStream", "CartesiaForwarder", "__version__"]
 
 from livekit.agents import Plugin
 

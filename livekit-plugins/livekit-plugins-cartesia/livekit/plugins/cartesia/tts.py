@@ -48,6 +48,7 @@ from .constants import (
     REQUEST_ID_HEADER,
     USER_AGENT,
 )
+from .forwarder import CartesiaForwarder
 from .log import logger
 from .models import (
     TTSDefaultVoiceId,
@@ -74,6 +75,7 @@ class _TTSOptions:
     base_url: str
     api_version: str
     pronunciation_dict_id: str | None
+    forwarder: CartesiaForwarder | None
 
     def get_http_url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -102,6 +104,7 @@ class TTS(tts.TTS):
         text_pacing: tts.SentenceStreamPacer | bool = False,
         base_url: str = "https://api.cartesia.ai",
         api_version: str = API_VERSION,
+        forwarder: CartesiaForwarder | None = None,
     ) -> None:
         """
         Create a new instance of Cartesia TTS.
@@ -124,6 +127,7 @@ class TTS(tts.TTS):
             tokenizer (tokenize.SentenceTokenizer, optional): The tokenizer to use. Defaults to `livekit.agents.tokenize.blingfire.SentenceTokenizer`.
             text_pacing (tts.SentenceStreamPacer | bool, optional): Stream pacer for the TTS. Set to True to use the default pacer, False to disable.
             base_url (str, optional): The base URL for the Cartesia API. Defaults to "https://api.cartesia.ai".
+            forwarder (CartesiaForwarder | None, optional): Optional forwarder to receive raw WebSocket messages. Defaults to None.
         """  # noqa: E501
 
         super().__init__(
@@ -155,6 +159,7 @@ class TTS(tts.TTS):
             word_timestamps=word_timestamps,
             api_version=api_version,
             pronunciation_dict_id=pronunciation_dict_id,
+            forwarder=forwarder,
         )
 
         if speed or emotion or volume or pronunciation_dict_id:
@@ -448,6 +453,10 @@ class SynthesizeStream(tts.SynthesizeStream):
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     logger.warning("unexpected Cartesia message type %s", msg.type)
                     continue
+
+                # Forward the message if forwarder is configured
+                if self._opts.forwarder is not None:
+                    self._opts.forwarder.add_data(msg.data)
 
                 data = json.loads(msg.data)
                 segment_id = data.get("context_id")
