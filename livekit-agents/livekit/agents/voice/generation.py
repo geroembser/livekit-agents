@@ -150,6 +150,7 @@ async def _llm_inference_task(
                             call_id=tool.call_id,
                             name=tool.name,
                             arguments=tool.arguments,
+                            extra=tool.extra or {},
                         )
                         data.generated_functions.append(fnc_call)
                         function_ch.send_nowait(fnc_call)
@@ -582,9 +583,12 @@ async def _execute_tools_task(
                     function_callable: Callable, fnc_call: llm.FunctionCall
                 ) -> None:
                     current_span = trace.get_current_span()
-                    current_span.set_attribute(trace_types.ATTR_FUNCTION_TOOL_NAME, fnc_call.name)
-                    current_span.set_attribute(
-                        trace_types.ATTR_FUNCTION_TOOL_ARGS, fnc_call.arguments
+                    current_span.set_attributes(
+                        {
+                            trace_types.ATTR_FUNCTION_TOOL_ID: fnc_call.call_id,
+                            trace_types.ATTR_FUNCTION_TOOL_NAME: fnc_call.name,
+                            trace_types.ATTR_FUNCTION_TOOL_ARGS: fnc_call.arguments,
+                        }
                     )
 
                     try:

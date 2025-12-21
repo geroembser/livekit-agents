@@ -71,6 +71,12 @@ class Voice:
     category: str
 
 
+@dataclass
+class PronunciationDictionaryLocator:
+    pronunciation_dictionary_id: str
+    version_id: str
+
+
 DEFAULT_VOICE_ID = "bIHbv24MWmeRgasZH58o"
 API_BASE_URL_V1 = "https://api.elevenlabs.io/v1"
 AUTHORIZATION_HEADER = "xi-api-key"
@@ -102,6 +108,9 @@ class TTS(tts.TTS):
         sync_alignment: bool = True,
         preferred_alignment: Literal["normalized", "original"] = "normalized",
         timestamps_for_non_websockets: bool = False,
+        pronunciation_dictionary_locators: NotGivenOr[
+            list[PronunciationDictionaryLocator]
+        ] = NOT_GIVEN,
     ) -> None:
         """
         Create a new instance of ElevenLabs TTS.
@@ -179,6 +188,7 @@ class TTS(tts.TTS):
             preferred_alignment=preferred_alignment,
             forwarder=forwarder,
             timestamps_for_non_websockets=timestamps_for_non_websockets,
+            pronunciation_dictionary_locators=pronunciation_dictionary_locators,
         )
         self._session = http_session
         self._streams = weakref.WeakSet[SynthesizeStream]()
@@ -213,6 +223,9 @@ class TTS(tts.TTS):
         voice_settings: NotGivenOr[VoiceSettings] = NOT_GIVEN,
         model: NotGivenOr[TTSModels | str] = NOT_GIVEN,
         language: NotGivenOr[str] = NOT_GIVEN,
+        pronunciation_dictionary_locators: NotGivenOr[
+            list[PronunciationDictionaryLocator]
+        ] = NOT_GIVEN,
     ) -> None:
         """
         Args:
@@ -220,6 +233,7 @@ class TTS(tts.TTS):
             voice_settings (NotGivenOr[VoiceSettings]): Voice settings.
             model (NotGivenOr[TTSModels | str]): TTS model to use.
             language (NotGivenOr[str]): Language code for the TTS model.
+            pronunciation_dictionary_locators (NotGivenOr[list[PronunciationDictionaryLocator]]): List of pronunciation dictionary locators.
         """
         changed = False
 
@@ -237,6 +251,10 @@ class TTS(tts.TTS):
 
         if is_given(language) and language != self._opts.language:
             self._opts.language = language
+            changed = True
+
+        if is_given(pronunciation_dictionary_locators):
+            self._opts.pronunciation_dictionary_locators = pronunciation_dictionary_locators
             changed = True
 
         if changed and self._current_connection:
@@ -523,6 +541,7 @@ class _TTSOptions:
     auto_mode: NotGivenOr[bool]
     forwarder: ElevenlabsForwarder | None
     timestamps_for_non_websockets: bool
+    pronunciation_dictionary_locators: NotGivenOr[list[PronunciationDictionaryLocator]]
 
 
 @dataclass
@@ -632,11 +651,19 @@ class _Connection:
                             if is_given(self._opts.voice_settings)
                             else {}
                         )
-                        init_pkt = {
+                        init_pkt: dict[str, Any] = {
                             "text": " ",
                             "voice_settings": voice_settings,
                             "context_id": msg.context_id,
                         }
+                        if is_given(self._opts.pronunciation_dictionary_locators):
+                            init_pkt["pronunciation_dictionary_locators"] = [
+                                {
+                                    "pronunciation_dictionary_id": locator.pronunciation_dictionary_id,
+                                    "version_id": locator.version_id,
+                                }
+                                for locator in self._opts.pronunciation_dictionary_locators
+                            ]
                         await self._ws.send_json(init_pkt)
                         self._active_contexts.add(msg.context_id)
 
@@ -677,7 +704,8 @@ class _Connection:
                     aiohttp.WSMsgType.CLOSE,
                     aiohttp.WSMsgType.CLOSING,
                 ):
-                    if not self._closed:
+                    if not self._closed and len(self._context_data) > 0:
+                        # websocket will be closed after all contexts are closed
                         logger.warning("websocket closed unexpectedly")
                     break
 
@@ -701,11 +729,18 @@ class _Connection:
                 if error := data.get("error"):
                     logger.error(
                         "elevenlabs tts returned error",
-                        extra={"context_id": context_id, "error": error},
+                        extra={"context_id": context_id, "error": error, "data": data},
                     )
-                    if not ctx.waiter.done():
-                        ctx.waiter.set_exception(APIError(message=error))
-                    self._cleanup_context(context_id)
+                    if context_id is not None:
+                        if ctx and not ctx.waiter.done():
+                            ctx.waiter.set_exception(APIError(message=error))
+                        self._cleanup_context(context_id)
+                    continue
+
+                if ctx is None:
+                    logger.warning(
+                        "unexpected message received from elevenlabs tts", extra={"data": data}
+                    )
                     continue
 
                 emitter = ctx.emitter
