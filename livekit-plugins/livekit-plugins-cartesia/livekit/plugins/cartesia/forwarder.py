@@ -31,7 +31,6 @@ class CartesiaForwarder:
                 
                 # Check if this is a timestamps event
                 if "word_timestamps" in parsed_data:
-                    print(f"CartesiaForwarder received timestamps data: {parsed_data}")
                     # Transform to ElevenLabs character-level format
                     transformed_data = self._transform_timestamps(parsed_data)
                     await self._forward_callback(json.dumps(transformed_data))
