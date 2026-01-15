@@ -877,11 +877,16 @@ class AgentActivity(RecognitionHooks):
         )
 
         if isinstance(self.llm, llm.RealtimeModel):
+            user_extra: dict[str, Any] | None = None
+            if is_given(user_message) and user_message is not None and user_message.extra:
+                user_extra = dict(user_message.extra)
+
             self._create_speech_task(
                 self._realtime_reply_task(
                     speech_handle=handle,
                     # TODO(theomonnom): support llm.ChatMessage for the realtime model
                     user_input=user_message.text_content if user_message else None,
+                    user_message_extra=user_extra,
                     instructions=instructions or None,
                     # TODO(theomonnom): the list of tools should always be passed here
                     model_settings=ModelSettings(tool_choice=tool_choice),
@@ -2157,6 +2162,7 @@ class AgentActivity(RecognitionHooks):
         speech_handle: SpeechHandle,
         model_settings: ModelSettings,
         user_input: str | None = None,
+        user_message_extra: dict[str, Any] | None = None,
         instructions: str | None = None,
     ) -> None:
         assert self._rt_session is not None, "rt_session is not available"
@@ -2170,7 +2176,8 @@ class AgentActivity(RecognitionHooks):
 
         if user_input is not None:
             chat_ctx = self._rt_session.chat_ctx.copy()
-            msg = chat_ctx.add_message(role="user", content=user_input)
+            extra = user_message_extra if user_message_extra is not None else NOT_GIVEN
+            msg = chat_ctx.add_message(role="user", content=user_input, extra=extra)
             await self._rt_session.update_chat_ctx(chat_ctx)
             self._agent._chat_ctx.items.append(msg)
             self._session._conversation_item_added(msg)

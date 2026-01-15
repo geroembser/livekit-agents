@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import (
     TYPE_CHECKING,
+    Any,
     Generic,
     Literal,
     Optional,
@@ -909,6 +910,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self,
         *,
         user_input: NotGivenOr[str] = NOT_GIVEN,
+        user_message_extra: NotGivenOr[dict[str, Any]] = NOT_GIVEN,
         instructions: NotGivenOr[str] = NOT_GIVEN,
         tool_choice: NotGivenOr[llm.ToolChoice] = NOT_GIVEN,
         allow_interruptions: NotGivenOr[bool] = NOT_GIVEN,
@@ -919,6 +921,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         Args:
             user_input (NotGivenOr[str], optional): The user's input that may influence the reply,
                 such as answering a question.
+            user_message_extra (NotGivenOr[dict[str, Any]], optional): Optional metadata to attach
+                to the generated user message via `ChatMessage.extra.update(...)`. For example,
+                pass `{"input_origin": "text_chat"}` to tag messages originating from text chat.
             instructions (NotGivenOr[str], optional): Additional instructions for generating the reply.
             tool_choice (NotGivenOr[llm.ToolChoice], optional): Specifies the external tool to use when
                 generating the reply. If generate_reply is invoked within a function_tool, defaults to "none".
@@ -930,11 +935,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         if self._activity is None:
             raise RuntimeError("AgentSession isn't running")
 
-        user_message = (
-            llm.ChatMessage(role="user", content=[user_input])
-            if is_given(user_input)
-            else NOT_GIVEN
-        )
+        user_message: NotGivenOr[llm.ChatMessage] = NOT_GIVEN
+        if is_given(user_input):
+            user_message = llm.ChatMessage(role="user", content=[user_input])
+            if is_given(user_message_extra):
+                user_message.extra.update(user_message_extra)
 
         run_state = self._global_run_state
         activity = self._next_activity if self._activity.scheduling_paused else self._activity
