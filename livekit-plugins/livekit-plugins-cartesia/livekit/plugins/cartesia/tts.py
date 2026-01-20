@@ -109,7 +109,7 @@ class TTS(tts.TTS):
         """
         Create a new instance of Cartesia TTS.
 
-        See https://docs.cartesia.ai/reference/web-socket/stream-speech/stream-speech for more details on the the Cartesia API.
+        See https://docs.cartesia.ai/reference/web-socket/stream-speech/stream-speech for more details on the Cartesia API.
 
         Args:
             model (TTSModels, optional): The Cartesia TTS model to use. Defaults to "sonic-2".
