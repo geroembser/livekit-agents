@@ -289,7 +289,6 @@ class LLM(llm.LLM):
             else InMemoryThoughtSignatureStorage()
         )
 
-
     @property
     def model(self) -> str:
         return self._opts.model
@@ -520,64 +519,94 @@ class LLMStream(llm.LLMStream):
                 **self._extra_kwargs,
             )
 
-            stream = await self._client.aio.models.generate_content_stream(
-                model=self._model,
-                contents=cast(types.ContentListUnion, turns),
-                config=config,
-            )
+            try:
+                stream = await self._client.aio.models.generate_content_stream(
+                    model=self._model,
+                    contents=cast(types.ContentListUnion, turns),
+                    config=config,
+                )
+            except Exception as e:
+                logger.error(f"gemini llm: error creating stream: {e}")
+                raise
 
             response_generated = False
             finish_reason: types.FinishReason | None = None
-            async for response in stream:
-                if response.prompt_feedback:
-                    raise APIStatusError(
-                        response.prompt_feedback.model_dump_json(),
-                        retryable=False,
-                        request_id=request_id,
-                    )
-
-                if not response.candidates:
-                    continue
-
-                if len(response.candidates) > 1:
-                    logger.warning(
-                        "gemini llm: there are multiple candidates in the response, returning response from the first one."  # noqa: E501
-                    )
-
-                candidate = response.candidates[0]
-
-                if not candidate.content or not candidate.content.parts:
-                    continue
-
-                if candidate.finish_reason is not None:
-                    finish_reason = candidate.finish_reason
-                    if candidate.finish_reason in BLOCKED_REASONS:
+            try:
+                async for response in stream:
+                    if response.prompt_feedback:
                         raise APIStatusError(
-                            f"generation blocked by gemini: {candidate.finish_reason}",
+                            response.prompt_feedback.model_dump_json(),
                             retryable=False,
                             request_id=request_id,
                         )
 
-                for part in candidate.content.parts:
-                    chat_chunk = self._parse_part(request_id, part)
-                    response_generated = True
-                    if chat_chunk is not None:
-                        retryable = False
-                        self._event_ch.send_nowait(chat_chunk)
+                    if not response.candidates:
+                        continue
 
-                if response.usage_metadata is not None:
-                    usage = response.usage_metadata
-                    self._event_ch.send_nowait(
-                        llm.ChatChunk(
-                            id=request_id,
-                            usage=llm.CompletionUsage(
-                                completion_tokens=usage.candidates_token_count or 0,
-                                prompt_tokens=usage.prompt_token_count or 0,
-                                prompt_cached_tokens=usage.cached_content_token_count or 0,
-                                total_tokens=usage.total_token_count or 0,
-                            ),
+                    if len(response.candidates) > 1:
+                        logger.warning(
+                            "gemini llm: there are multiple candidates in the response, returning response from the first one."  # noqa: E501
                         )
-                    )
+
+                    candidate = response.candidates[0]
+
+                    if not candidate.content or not candidate.content.parts:
+                        continue
+
+                    if candidate.finish_reason is not None:
+                        finish_reason = candidate.finish_reason
+                        if candidate.finish_reason in BLOCKED_REASONS:
+                            raise APIStatusError(
+                                f"generation blocked by gemini: {candidate.finish_reason}",
+                                retryable=False,
+                                request_id=request_id,
+                            )
+
+                    # count the number of function calls in the response
+                    function_call_parts = [p for p in candidate.content.parts if p.function_call]
+                    if len(function_call_parts) > 1:
+                        logger.warning(
+                            "gemini llm: parallel function calling!."  # noqa: E501
+                        )
+
+                    # For Gemini 3 parallel function calls, the thought_signature is only
+                    # on the first function call part. Extract it to use for all function calls.
+                    turn_thought_signature: bytes | None = None
+                    if _is_gemini_3_model(self._model):
+                        for p in candidate.content.parts:
+                            if (
+                                p.function_call
+                                and hasattr(p, "thought_signature")
+                                and p.thought_signature
+                            ):
+                                turn_thought_signature = p.thought_signature
+                                break
+
+                    for part in candidate.content.parts:
+                        chat_chunk = self._parse_part(
+                            request_id, part, turn_thought_signature=turn_thought_signature
+                        )
+                        response_generated = True
+                        if chat_chunk is not None:
+                            retryable = False
+                            self._event_ch.send_nowait(chat_chunk)
+
+                    if response.usage_metadata is not None:
+                        usage = response.usage_metadata
+                        self._event_ch.send_nowait(
+                            llm.ChatChunk(
+                                id=request_id,
+                                usage=llm.CompletionUsage(
+                                    completion_tokens=usage.candidates_token_count or 0,
+                                    prompt_tokens=usage.prompt_token_count or 0,
+                                    prompt_cached_tokens=usage.cached_content_token_count or 0,
+                                    total_tokens=usage.total_token_count or 0,
+                                ),
+                            )
+                        )
+            except Exception as e:
+                logger.error(f"gemini llm: error during stream iteration: {e}")
+                raise
 
             if not response_generated:
                 raise APIStatusError(
@@ -617,7 +646,9 @@ class LLMStream(llm.LLMStream):
                 retryable=retryable,
             ) from e
 
-    def _parse_part(self, id: str, part: types.Part) -> llm.ChatChunk | None:
+    def _parse_part(
+        self, id: str, part: types.Part, *, turn_thought_signature: bytes | None = None
+    ) -> llm.ChatChunk | None:
         if part.function_call:
             tool_call = llm.FunctionToolCall(
                 arguments=json.dumps(part.function_call.args),
@@ -626,13 +657,20 @@ class LLMStream(llm.LLMStream):
             )
 
             # Store thought_signature for Gemini 3 multi-turn function calling
-            if (
-                _is_gemini_3_model(self._model)
-                and hasattr(part, "thought_signature")
-                and part.thought_signature
-            ):
+            # Use part's thought_signature if available, otherwise fall back to turn_thought_signature
+            # (for parallel function calls, only the first part has the thought_signature)
+            effective_thought_signature = (
+                part.thought_signature
+                if hasattr(part, "thought_signature") and part.thought_signature
+                else turn_thought_signature
+            )
+            if _is_gemini_3_model(self._model) and effective_thought_signature:
                 self._llm._thought_signature_storage.store(
-                    tool_call.call_id, part.thought_signature
+                    tool_call.call_id, effective_thought_signature
+                )
+            elif _is_gemini_3_model(self._model):
+                logger.warning(
+                    "Gemini 3 model used but no thought_signature found in function call part."
                 )
 
             chat_chunk = llm.ChatChunk(
