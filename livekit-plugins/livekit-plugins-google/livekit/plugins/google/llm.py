@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -37,6 +38,71 @@ from .log import logger
 from .models import ChatModels
 from .utils import create_tools_config, to_response_format
 from .version import __version__
+
+
+class ThoughtSignatureStorage(ABC):
+    """
+    Abstract base class for thought signature storage.
+    
+    Thought signatures are used by Gemini 3 models for multi-turn function calling
+    to maintain consistency across turns. By providing a custom storage implementation,
+    clients can synchronize thought signatures across multiple LLM instances or sessions.
+    
+    Example usage:
+        class SharedStorage(ThoughtSignatureStorage):
+            def __init__(self):
+                self._signatures = {}
+            
+            def get_all(self) -> dict[str, bytes]:
+                return self._signatures.copy()
+            
+            def store(self, call_id: str, signature: bytes) -> None:
+                self._signatures[call_id] = signature
+        
+        storage = SharedStorage()
+        llm1 = LLM(thought_signature_storage=storage)
+        llm2 = LLM(thought_signature_storage=storage)  # shares signatures with llm1
+    """
+
+    @abstractmethod
+    def get_all(self) -> dict[str, bytes]:
+        """
+        Return all stored thought signatures.
+        
+        Returns:
+            A dictionary mapping call_id to thought signature bytes.
+        """
+        ...
+
+    @abstractmethod
+    def store(self, call_id: str, signature: bytes) -> None:
+        """
+        Store a thought signature for a given call ID.
+        
+        Args:
+            call_id: The unique identifier for the function call.
+            signature: The thought signature bytes from the Gemini response.
+        """
+        ...
+
+
+class InMemoryThoughtSignatureStorage(ThoughtSignatureStorage):
+    """
+    In-memory implementation of thought signature storage.
+    
+    This is the default storage used when no custom storage is provided.
+    It can also be instantiated directly and shared across multiple LLM instances
+    to synchronize thought signatures (e.g., when using a FallbackAdapter).
+    """
+
+    def __init__(self) -> None:
+        self._signatures: dict[str, bytes] = {}
+
+    def get_all(self) -> dict[str, bytes]:
+        return self._signatures
+
+    def store(self, call_id: str, signature: bytes) -> None:
+        self._signatures[call_id] = signature
 
 
 def _is_gemini_3_model(model: str) -> bool:
@@ -68,6 +134,7 @@ class _LLMOptions:
     http_options: NotGivenOr[types.HttpOptions]
     seed: NotGivenOr[int]
     safety_settings: NotGivenOr[list[types.SafetySettingOrDict]]
+    thought_signature_storage: ThoughtSignatureStorage | None
 
 
 BLOCKED_REASONS = [
@@ -104,6 +171,7 @@ class LLM(llm.LLM):
         http_options: NotGivenOr[types.HttpOptions] = NOT_GIVEN,
         seed: NotGivenOr[int] = NOT_GIVEN,
         safety_settings: NotGivenOr[list[types.SafetySettingOrDict]] = NOT_GIVEN,
+        thought_signature_storage: ThoughtSignatureStorage | None = None,
     ) -> None:
         """
         Create a new instance of Google GenAI LLM.
@@ -134,6 +202,10 @@ class LLM(llm.LLM):
             http_options (HttpOptions, optional): The HTTP options to use for the session.
             seed (int, optional): Random seed for reproducible generation. Defaults to None.
             safety_settings (list[SafetySettingOrDict], optional): Safety settings for content filtering. Defaults to None.
+            thought_signature_storage (ThoughtSignatureStorage, optional): Custom storage for Gemini 3 thought signatures.
+                When provided, thought signatures will be stored in and retrieved from this storage,
+                enabling synchronization between multiple LLM instances or sessions. Defaults to None
+                (uses internal storage).
         """  # noqa: E501
         super().__init__()
         gcp_project = project if is_given(project) else os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -201,6 +273,7 @@ class LLM(llm.LLM):
             http_options=http_options,
             seed=seed,
             safety_settings=safety_settings,
+            thought_signature_storage=thought_signature_storage,
         )
         self._client = Client(
             api_key=gemini_api_key,
@@ -209,7 +282,13 @@ class LLM(llm.LLM):
             location=gcp_location,
         )
         # Store thought_signatures for Gemini 3 multi-turn function calling
-        self._thought_signatures: dict[str, bytes] = {}
+        # Use provided storage or create default internal storage
+        self._thought_signature_storage: ThoughtSignatureStorage = (
+            thought_signature_storage
+            if thought_signature_storage is not None
+            else InMemoryThoughtSignatureStorage()
+        )
+
 
     @property
     def model(self) -> str:
@@ -221,6 +300,15 @@ class LLM(llm.LLM):
             return "Vertex AI"
         else:
             return "Gemini"
+
+    @property
+    def thought_signature_storage(self) -> ThoughtSignatureStorage:
+        """
+        Get the thought signature storage used by this LLM instance.
+        
+        This can be used to inspect or share the storage between LLM instances.
+        """
+        return self._thought_signature_storage
 
     def chat(
         self,
@@ -403,7 +491,9 @@ class LLMStream(llm.LLMStream):
         try:
             # Pass thought_signatures for Gemini 3 multi-turn function calling
             thought_sigs = (
-                self._llm._thought_signatures if _is_gemini_3_model(self._model) else None
+                self._llm._thought_signature_storage.get_all()
+                if _is_gemini_3_model(self._model)
+                else None
             )
             turns_dict, extra_data = self._chat_ctx.to_provider_format(
                 format="google", thought_signatures=thought_sigs
@@ -541,7 +631,9 @@ class LLMStream(llm.LLMStream):
                 and hasattr(part, "thought_signature")
                 and part.thought_signature
             ):
-                self._llm._thought_signatures[tool_call.call_id] = part.thought_signature
+                self._llm._thought_signature_storage.store(
+                    tool_call.call_id, part.thought_signature
+                )
 
             chat_chunk = llm.ChatChunk(
                 id=id,

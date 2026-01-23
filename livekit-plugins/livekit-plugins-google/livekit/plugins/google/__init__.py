@@ -20,7 +20,7 @@ See https://docs.livekit.io/agents/integrations/stt/google/ for more information
 """
 
 from . import beta, realtime, tools
-from .llm import LLM
+from .llm import LLM, ThoughtSignatureStorage, InMemoryThoughtSignatureStorage
 from .stt import STT, SpeechStream
 from .tts import TTS
 from .version import __version__
@@ -33,6 +33,8 @@ __all__ = [
     "__version__",
     "beta",
     "LLM",
+    "ThoughtSignatureStorage",
+    "InMemoryThoughtSignatureStorage",
     "tools",
 ]
 from livekit.agents import Plugin
