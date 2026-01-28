@@ -20,7 +20,7 @@ See https://docs.livekit.io/agents/integrations/stt/google/ for more information
 """
 
 from . import beta, realtime, tools
-from .llm import LLM, ThoughtSignatureStorage, InMemoryThoughtSignatureStorage
+from .llm import LLM, ThoughtSignatureStorage, InMemoryThoughtSignatureStorage, PYDANTIC_AI_GATEWAY_BASE_URL
 from .stt import STT, SpeechStream
 from .tts import TTS
 from .version import __version__
@@ -35,6 +35,7 @@ __all__ = [
     "LLM",
     "ThoughtSignatureStorage",
     "InMemoryThoughtSignatureStorage",
+    "PYDANTIC_AI_GATEWAY_BASE_URL",
     "tools",
 ]
 from livekit.agents import Plugin

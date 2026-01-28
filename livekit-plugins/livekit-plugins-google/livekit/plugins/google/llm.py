@@ -147,6 +147,9 @@ BLOCKED_REASONS = [
 ]
 
 
+PYDANTIC_AI_GATEWAY_BASE_URL = "https://gateway.pydantic.dev/proxy/google-vertex"
+
+
 class LLM(llm.LLM):
     def __init__(
         self,
@@ -275,11 +278,16 @@ class LLM(llm.LLM):
             safety_settings=safety_settings,
             thought_signature_storage=thought_signature_storage,
         )
+        
+        # Build http_options for Client if provided (for gateway support)
+        client_http_options = http_options if is_given(http_options) else None
+        
         self._client = Client(
             api_key=gemini_api_key,
             vertexai=use_vertexai,
             project=gcp_project,
             location=gcp_location,
+            http_options=client_http_options,
         )
         # Store thought_signatures for Gemini 3 multi-turn function calling
         # Use provided storage or create default internal storage
@@ -288,6 +296,160 @@ class LLM(llm.LLM):
             if thought_signature_storage is not None
             else InMemoryThoughtSignatureStorage()
         )
+
+    @classmethod
+    def with_gateway(
+        cls,
+        *,
+        model: ChatModels | str = "gemini-2.5-flash",
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: NotGivenOr[float] = NOT_GIVEN,
+        max_output_tokens: NotGivenOr[int] = NOT_GIVEN,
+        top_p: NotGivenOr[float] = NOT_GIVEN,
+        top_k: NotGivenOr[float] = NOT_GIVEN,
+        presence_penalty: NotGivenOr[float] = NOT_GIVEN,
+        frequency_penalty: NotGivenOr[float] = NOT_GIVEN,
+        tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
+        thinking_config: NotGivenOr[types.ThinkingConfigOrDict] = NOT_GIVEN,
+        retrieval_config: NotGivenOr[types.RetrievalConfigOrDict] = NOT_GIVEN,
+        automatic_function_calling_config: NotGivenOr[
+            types.AutomaticFunctionCallingConfigOrDict
+        ] = NOT_GIVEN,
+        http_options: NotGivenOr[types.HttpOptions] = NOT_GIVEN,
+        seed: NotGivenOr[int] = NOT_GIVEN,
+        safety_settings: NotGivenOr[list[types.SafetySettingOrDict]] = NOT_GIVEN,
+        thought_signature_storage: ThoughtSignatureStorage | None = None,
+    ) -> "LLM":
+        """
+        Create a new instance of Google GenAI LLM using the Pydantic AI Gateway.
+
+        The Pydantic AI Gateway provides a unified proxy for accessing various LLM providers.
+        This method configures the LLM to route requests through the gateway.
+
+        Environment Requirements:
+        - Set the `PYDANTIC_AI_GATEWAY_API_KEY` environment variable or pass `api_key`.
+        - Optionally set `PYDANTIC_AI_GATEWAY_BASE_URL` to use a custom gateway URL.
+
+        Args:
+            model (ChatModels | str, optional): The model name to use. Defaults to "gemini-2.5-flash".
+            api_key (str, optional): The API key for Pydantic AI Gateway. If not provided,
+                it attempts to read from the `PYDANTIC_AI_GATEWAY_API_KEY` environment variable.
+            base_url (str, optional): Custom gateway base URL. If not provided, uses
+                `PYDANTIC_AI_GATEWAY_BASE_URL` env var or defaults to the official gateway.
+            temperature (float, optional): Sampling temperature for response generation.
+            max_output_tokens (int, optional): Maximum number of tokens to generate.
+            top_p (float, optional): The nucleus sampling probability.
+            top_k (int, optional): The top-k sampling value.
+            presence_penalty (float, optional): Penalizes generating previously mentioned concepts.
+            frequency_penalty (float, optional): Penalizes repeating words.
+            tool_choice (ToolChoice, optional): Specifies whether to use tools.
+            thinking_config (ThinkingConfigOrDict, optional): The thinking configuration.
+            retrieval_config (RetrievalConfigOrDict, optional): The retrieval configuration.
+            automatic_function_calling_config (AutomaticFunctionCallingConfigOrDict, optional): 
+                The automatic function calling configuration.
+            http_options (HttpOptions, optional): Additional HTTP options (will be merged with gateway config).
+            seed (int, optional): Random seed for reproducible generation.
+            safety_settings (list[SafetySettingOrDict], optional): Safety settings for content filtering.
+            thought_signature_storage (ThoughtSignatureStorage, optional): Custom storage for thought signatures.
+
+        Returns:
+            LLM: A configured LLM instance that routes through the Pydantic AI Gateway.
+
+        Raises:
+            ValueError: If no API key is provided and PYDANTIC_AI_GATEWAY_API_KEY is not set.
+        """
+        gateway_api_key = api_key or os.environ.get("PYDANTIC_AI_GATEWAY_API_KEY")
+        if not gateway_api_key:
+            raise ValueError(
+                "API key is required for Pydantic AI Gateway. "
+                "Set PYDANTIC_AI_GATEWAY_API_KEY environment variable or pass api_key parameter."
+            )
+
+        gateway_base_url = base_url or os.environ.get(
+            "PYDANTIC_AI_GATEWAY_BASE_URL", PYDANTIC_AI_GATEWAY_BASE_URL
+        )
+
+        # Build http_options with gateway base_url and Authorization header
+        # The gateway expects a Bearer token in the Authorization header
+        gateway_headers = {"Authorization": f"Bearer {gateway_api_key}"}
+        
+        # Merge with any provided http_options
+        if is_given(http_options):
+            # If http_options provided, merge headers and use provided timeout
+            existing_headers = {}
+            if hasattr(http_options, 'headers') and http_options.headers:
+                existing_headers = dict(http_options.headers)
+            merged_headers = {**existing_headers, **gateway_headers}
+            timeout_val = None
+            if hasattr(http_options, 'timeout') and http_options.timeout:
+                timeout_val = http_options.timeout
+            # Use dict format for http_options to ensure proper serialization
+            merged_http_options = types.HttpOptions(
+                base_url=gateway_base_url,
+                timeout=timeout_val,
+                headers=merged_headers,
+            )
+        else:
+            merged_http_options = types.HttpOptions(
+                base_url=gateway_base_url,
+                headers=gateway_headers,
+            )
+
+        # Create instance with gateway configuration
+        # Use vertexai=True since the gateway uses Vertex AI API format
+        instance = cls.__new__(cls)
+        llm.LLM.__init__(instance)
+
+        # Validate thinking_config
+        if is_given(thinking_config):
+            _thinking_budget = None
+            if isinstance(thinking_config, dict):
+                _thinking_budget = thinking_config.get("thinking_budget")
+            elif isinstance(thinking_config, types.ThinkingConfig):
+                _thinking_budget = thinking_config.thinking_budget
+
+            if _thinking_budget is not None:
+                if not isinstance(_thinking_budget, int):
+                    raise ValueError("thinking_budget inside thinking_config must be an integer")
+
+        instance._opts = _LLMOptions(
+            model=model,
+            temperature=temperature,
+            tool_choice=tool_choice,
+            vertexai=True,  # Gateway uses Vertex AI format
+            project=NOT_GIVEN,
+            location=NOT_GIVEN,
+            max_output_tokens=max_output_tokens,
+            top_p=top_p,
+            top_k=top_k,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            thinking_config=thinking_config,
+            retrieval_config=retrieval_config,
+            automatic_function_calling_config=automatic_function_calling_config,
+            http_options=merged_http_options,
+            seed=seed,
+            safety_settings=safety_settings,
+            thought_signature_storage=thought_signature_storage,
+        )
+
+        # Create client with gateway configuration
+        # Pass api_key to help Client initialize (bypasses GCP credential check)
+        # Actual authentication is done via Authorization header in http_options
+        instance._client = Client(
+            api_key=gateway_api_key,
+            vertexai=True,  # Gateway uses Vertex AI API format
+            http_options=merged_http_options,
+        )
+
+        instance._thought_signature_storage = (
+            thought_signature_storage
+            if thought_signature_storage is not None
+            else InMemoryThoughtSignatureStorage()
+        )
+
+        return instance
 
     @property
     def model(self) -> str:
@@ -506,9 +668,16 @@ class LLMStream(llm.LLMStream):
             http_options = self._llm._opts.http_options or types.HttpOptions(
                 timeout=int(self._conn_options.timeout * 1000)
             )
-            if not http_options.headers:
-                http_options.headers = {}
-            http_options.headers["x-goog-api-client"] = f"livekit-agents/{__version__}"
+            # Preserve existing headers (e.g., Authorization for gateway) while adding our header
+            existing_headers = {}
+            if http_options.headers:
+                existing_headers = dict(http_options.headers) if not isinstance(http_options.headers, dict) else http_options.headers.copy()
+            existing_headers["x-goog-api-client"] = f"livekit-agents/{__version__}"
+            http_options = types.HttpOptions(
+                base_url=http_options.base_url if hasattr(http_options, 'base_url') else None,
+                timeout=http_options.timeout if hasattr(http_options, 'timeout') else None,
+                headers=existing_headers,
+            )
             config = types.GenerateContentConfig(
                 system_instruction=(
                     [types.Part(text=content) for content in extra_data.system_messages]
