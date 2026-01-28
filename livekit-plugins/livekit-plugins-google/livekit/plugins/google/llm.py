@@ -278,16 +278,11 @@ class LLM(llm.LLM):
             safety_settings=safety_settings,
             thought_signature_storage=thought_signature_storage,
         )
-        
-        # Build http_options for Client if provided (for gateway support)
-        client_http_options = http_options if is_given(http_options) else None
-        
         self._client = Client(
             api_key=gemini_api_key,
             vertexai=use_vertexai,
             project=gcp_project,
             location=gcp_location,
-            http_options=client_http_options,
         )
         # Store thought_signatures for Gemini 3 multi-turn function calling
         # Use provided storage or create default internal storage
@@ -668,16 +663,9 @@ class LLMStream(llm.LLMStream):
             http_options = self._llm._opts.http_options or types.HttpOptions(
                 timeout=int(self._conn_options.timeout * 1000)
             )
-            # Preserve existing headers (e.g., Authorization for gateway) while adding our header
-            existing_headers = {}
-            if http_options.headers:
-                existing_headers = dict(http_options.headers) if not isinstance(http_options.headers, dict) else http_options.headers.copy()
-            existing_headers["x-goog-api-client"] = f"livekit-agents/{__version__}"
-            http_options = types.HttpOptions(
-                base_url=http_options.base_url if hasattr(http_options, 'base_url') else None,
-                timeout=http_options.timeout if hasattr(http_options, 'timeout') else None,
-                headers=existing_headers,
-            )
+            if not http_options.headers:
+                http_options.headers = {}
+            http_options.headers["x-goog-api-client"] = f"livekit-agents/{__version__}"
             config = types.GenerateContentConfig(
                 system_instruction=(
                     [types.Part(text=content) for content in extra_data.system_messages]
