@@ -11,7 +11,7 @@ class ElevenlabsForwarder:
     def __init__(self, forward_callback: ForwardCallback) -> None:
         """
         Initialize the forwarder with a callback function.
-        
+
         Args:
             forward_callback: An async function that will be called with the data to forward
         """

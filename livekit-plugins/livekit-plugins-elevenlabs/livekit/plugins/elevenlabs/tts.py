@@ -40,10 +40,9 @@ from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, NotGive
 from livekit.agents.utils import is_given
 from livekit.agents.voice.io import TimedString
 
+from .forwarder import ElevenlabsForwarder
 from .log import logger
 from .models import TTSEncoding, TTSModels
-
-from .forwarder import ElevenlabsForwarder
 
 # by default, use 22.05kHz sample rate at 32kbps
 # in our testing,  reduce TTFB by about ~110ms
@@ -343,7 +342,7 @@ class ChunkedStream(tts.ChunkedStream):
                 if self._opts.timestamps_for_non_websockets:
                     # Handle JSON response with timestamps
                     content = await resp.json()
-                    
+
                     # Forward alignment data to forwarder if available
                     forwarder = self._tts._opts.forwarder
                     if forwarder is not None:
@@ -370,21 +369,21 @@ class ChunkedStream(tts.ChunkedStream):
                             "normalizedAlignment": None
                         }
                         forwarder.add_data(json.dumps(final_forward_data))
-                    
+
                     # Decode base64 audio
                     audio_base64 = content.get("audio_base64")
                     if not audio_base64:
                         raise APIError(message="11labs returned no audio_base64 in response", body=str(content))
-                    
+
                     audio_data = base64.b64decode(audio_base64)
-                    
+
                     output_emitter.initialize(
                         request_id=utils.shortuuid(),
                         sample_rate=self._opts.sample_rate,
                         num_channels=1,
                         mime_type="audio/mp3",
                     )
-                    
+
                     output_emitter.push(audio_data)
                     output_emitter.flush()
                 else:
@@ -725,7 +724,7 @@ class _Connection:
                 # Forward the message if forwarder is configured
                 if self._opts.forwarder is not None:
                     self._opts.forwarder.add_data(msg.data)
-                
+
                 context_id = data.get("contextId")
 
                 if not context_id or context_id not in self._context_data:
@@ -884,7 +883,7 @@ def _synthesize_url(opts: _TTSOptions) -> str:
     voice_id = opts.voice_id
     model_id = opts.model
     output_format = opts.encoding
-    
+
     if opts.timestamps_for_non_websockets:
         # Use the /with-timestamps endpoint
         url = f"{base_url}/text-to-speech/{voice_id}/with-timestamps"
