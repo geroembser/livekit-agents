@@ -43,22 +43,22 @@ from .version import __version__
 class ThoughtSignatureStorage(ABC):
     """
     Abstract base class for thought signature storage.
-    
+
     Thought signatures are used by Gemini 3 models for multi-turn function calling
     to maintain consistency across turns. By providing a custom storage implementation,
     clients can synchronize thought signatures across multiple LLM instances or sessions.
-    
+
     Example usage:
         class SharedStorage(ThoughtSignatureStorage):
             def __init__(self):
                 self._signatures = {}
-            
+
             def get_all(self) -> dict[str, bytes]:
                 return self._signatures.copy()
-            
+
             def store(self, call_id: str, signature: bytes) -> None:
                 self._signatures[call_id] = signature
-        
+
         storage = SharedStorage()
         llm1 = LLM(thought_signature_storage=storage)
         llm2 = LLM(thought_signature_storage=storage)  # shares signatures with llm1
@@ -68,7 +68,7 @@ class ThoughtSignatureStorage(ABC):
     def get_all(self) -> dict[str, bytes]:
         """
         Return all stored thought signatures.
-        
+
         Returns:
             A dictionary mapping call_id to thought signature bytes.
         """
@@ -78,7 +78,7 @@ class ThoughtSignatureStorage(ABC):
     def store(self, call_id: str, signature: bytes) -> None:
         """
         Store a thought signature for a given call ID.
-        
+
         Args:
             call_id: The unique identifier for the function call.
             signature: The thought signature bytes from the Gemini response.
@@ -89,7 +89,7 @@ class ThoughtSignatureStorage(ABC):
 class InMemoryThoughtSignatureStorage(ThoughtSignatureStorage):
     """
     In-memory implementation of thought signature storage.
-    
+
     This is the default storage used when no custom storage is provided.
     It can also be instantiated directly and shared across multiple LLM instances
     to synchronize thought signatures (e.g., when using a FallbackAdapter).
@@ -113,6 +113,18 @@ def _is_gemini_3_model(model: str) -> bool:
 def _is_gemini_3_flash_model(model: str) -> bool:
     """Check if model is Gemini 3 Flash"""
     return "gemini-3-flash" in model.lower() or model.lower().startswith("gemini-3-flash")
+
+
+def _requires_thought_signatures(model: str) -> bool:
+    """Check if model requires thought_signature handling for multi-turn function calling.
+
+    Gemini 2.5+ models require thought signatures to be stored from responses and
+    passed back in subsequent requests for proper multi-turn function calling.
+    """
+    if _is_gemini_3_model(model):
+        return True
+    model_lower = model.lower()
+    return "gemini-2.5" in model_lower or model_lower.startswith("gemini-2.5")
 
 
 @dataclass
@@ -315,7 +327,7 @@ class LLM(llm.LLM):
         seed: NotGivenOr[int] = NOT_GIVEN,
         safety_settings: NotGivenOr[list[types.SafetySettingOrDict]] = NOT_GIVEN,
         thought_signature_storage: ThoughtSignatureStorage | None = None,
-    ) -> "LLM":
+    ) -> LLM:
         """
         Create a new instance of Google GenAI LLM using the Pydantic AI Gateway.
 
@@ -341,7 +353,7 @@ class LLM(llm.LLM):
             tool_choice (ToolChoice, optional): Specifies whether to use tools.
             thinking_config (ThinkingConfigOrDict, optional): The thinking configuration.
             retrieval_config (RetrievalConfigOrDict, optional): The retrieval configuration.
-            automatic_function_calling_config (AutomaticFunctionCallingConfigOrDict, optional): 
+            automatic_function_calling_config (AutomaticFunctionCallingConfigOrDict, optional):
                 The automatic function calling configuration.
             http_options (HttpOptions, optional): Additional HTTP options (will be merged with gateway config).
             seed (int, optional): Random seed for reproducible generation.
@@ -368,16 +380,16 @@ class LLM(llm.LLM):
         # Build http_options with gateway base_url and Authorization header
         # The gateway expects a Bearer token in the Authorization header
         gateway_headers = {"Authorization": f"Bearer {gateway_api_key}"}
-        
+
         # Merge with any provided http_options
         if is_given(http_options):
             # If http_options provided, merge headers and use provided timeout
             existing_headers = {}
-            if hasattr(http_options, 'headers') and http_options.headers:
+            if hasattr(http_options, "headers") and http_options.headers:
                 existing_headers = dict(http_options.headers)
             merged_headers = {**existing_headers, **gateway_headers}
             timeout_val = None
-            if hasattr(http_options, 'timeout') and http_options.timeout:
+            if hasattr(http_options, "timeout") and http_options.timeout:
                 timeout_val = http_options.timeout
             # Use dict format for http_options to ensure proper serialization
             merged_http_options = types.HttpOptions(
@@ -461,7 +473,7 @@ class LLM(llm.LLM):
     def thought_signature_storage(self) -> ThoughtSignatureStorage:
         """
         Get the thought signature storage used by this LLM instance.
-        
+
         This can be used to inspect or share the storage between LLM instances.
         """
         return self._thought_signature_storage
@@ -540,7 +552,7 @@ class LLM(llm.LLM):
             )
 
         if is_given(response_format):
-            extra["response_schema"] = to_response_format(response_format)  # type: ignore
+            extra["response_schema"] = to_response_format(response_format)
             extra["response_mime_type"] = "application/json"
 
         if is_given(self._opts.temperature):
@@ -566,7 +578,7 @@ class LLM(llm.LLM):
 
             # Extract both parameters
             _budget = None
-            _level = None
+            _level: str | types.ThinkingLevel | None = None
             if isinstance(thinking_cfg, dict):
                 _budget = thinking_cfg.get("thinking_budget")
                 _level = thinking_cfg.get("thinking_level")
@@ -645,7 +657,7 @@ class LLMStream(llm.LLMStream):
         request_id = utils.shortuuid()
 
         try:
-            # Pass thought_signatures for Gemini 3 multi-turn function calling
+            # Pass thought_signatures for Gemini 2.5+ multi-turn function calling
             thought_sigs = (
                 self._llm._thought_signature_storage.get_all()
                 if _is_gemini_3_model(self._model)
@@ -779,7 +791,7 @@ class LLMStream(llm.LLMStream):
                 status_code=e.code,
                 body=f"{e.message} {e.status}",
                 request_id=request_id,
-                retryable=False if e.code != 429 else True,
+                retryable=True if e.code in {429, 499} else False,
             ) from e
         except ServerError as e:
             raise APIStatusError(
@@ -797,6 +809,8 @@ class LLMStream(llm.LLMStream):
                 request_id=request_id,
                 retryable=retryable,
             ) from e
+        except (APIStatusError, APIConnectionError):
+            raise
         except Exception as e:
             raise APIConnectionError(
                 f"gemini llm: error generating content {str(e)}",

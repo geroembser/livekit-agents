@@ -81,6 +81,7 @@ uv pip install pip && uv run mypy --install-types --non-interactive \
     -p livekit.plugins.nltk \
     -p livekit.plugins.resemble \
     -p livekit.plugins.rime \
+    -p livekit.plugins.rtzr \
     -p livekit.plugins.silero \
     -p livekit.plugins.speechify \
     -p livekit.plugins.speechmatics \
@@ -91,6 +92,7 @@ uv pip install pip && uv run mypy --install-types --non-interactive \
     -p livekit.plugins.baseten \
     -p livekit.plugins.sarvam \
     -p livekit.plugins.inworld \
+    -p livekit.plugins.keyframe \
     -p livekit.plugins.simli \
     -p livekit.plugins.anam
 ```

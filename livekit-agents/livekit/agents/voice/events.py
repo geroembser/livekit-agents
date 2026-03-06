@@ -3,11 +3,12 @@ from __future__ import annotations
 import time
 import uuid
 from enum import Enum, unique
-from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeVar, Union
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from typing_extensions import Self
 
+from ..language import LanguageCode
 from ..llm import (
     LLM,
     ChatMessage,
@@ -119,7 +120,7 @@ class UserInputTranscribedEvent(BaseModel):
     transcript: str
     is_final: bool
     speaker_id: str | None = None
-    language: str | None = None
+    language: LanguageCode | None = None
     created_at: float = Field(default_factory=time.time)
 
 
@@ -182,7 +183,7 @@ class FunctionToolsExecutedEvent(BaseModel):
     _handoff_required: bool = PrivateAttr(default=False)
 
     def zipped(self) -> list[tuple[FunctionCall, FunctionCallOutput | None]]:
-        return list(zip(self.function_calls, self.function_call_outputs))
+        return list(zip(self.function_calls, self.function_call_outputs, strict=False))
 
     def cancel_tool_reply(self) -> None:
         self._reply_required = False
@@ -244,18 +245,16 @@ class CloseEvent(BaseModel):
 
 
 AgentEvent = Annotated[
-    Union[
-        UserInputTranscribedEvent,
-        UserStateChangedEvent,
-        AgentStateChangedEvent,
-        AgentFalseInterruptionEvent,
-        MetricsCollectedEvent,
-        ConversationItemAddedEvent,
-        AgentActionEvent,
-        FunctionToolsExecutedEvent,
-        SpeechCreatedEvent,
-        ErrorEvent,
-        CloseEvent,
-    ],
+    UserInputTranscribedEvent
+    | UserStateChangedEvent
+    | AgentStateChangedEvent
+    | AgentFalseInterruptionEvent
+    | MetricsCollectedEvent
+    | ConversationItemAddedEvent
+    | AgentActionEvent
+    | FunctionToolsExecutedEvent
+    | SpeechCreatedEvent
+    | ErrorEvent
+    | CloseEvent,
     Field(discriminator="type"),
 ]
