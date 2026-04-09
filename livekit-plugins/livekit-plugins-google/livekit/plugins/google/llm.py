@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, cast
@@ -161,6 +162,27 @@ BLOCKED_REASONS = [
 
 
 PYDANTIC_AI_GATEWAY_BASE_URL = "https://gateway.pydantic.dev/proxy/google-vertex"
+_PYDANTIC_AI_GATEWAY_BASE_ROUTE = "google-vertex"
+_PYDANTIC_TOKEN_PATTERN = re.compile(
+    r"^pylf_v(?P<version>[0-9]+)_(?P<region>[a-z]+)_[a-zA-Z0-9-_]+$"
+)
+
+
+def _infer_gateway_base_url(api_key: str) -> str:
+    """Infer the Pydantic AI gateway base URL from the API key.
+
+    Mirrors the region-aware behavior in `pydantic_ai.providers.gateway` while
+    preserving the historical `/proxy/google-vertex` fallback used by this plugin.
+    """
+    if match := _PYDANTIC_TOKEN_PATTERN.match(api_key):
+        region = match.group("region")
+        assert isinstance(region, str)
+
+        if region.startswith("staging"):
+            return f"https://gateway.pydantic.info/proxy/{_PYDANTIC_AI_GATEWAY_BASE_ROUTE}"
+        return f"https://gateway-{region}.pydantic.dev/proxy/{_PYDANTIC_AI_GATEWAY_BASE_ROUTE}"
+
+    return PYDANTIC_AI_GATEWAY_BASE_URL
 
 
 class LLM(llm.LLM):
@@ -381,8 +403,10 @@ class LLM(llm.LLM):
                 "Set PYDANTIC_AI_GATEWAY_API_KEY environment variable or pass api_key parameter."
             )
 
-        gateway_base_url = base_url or os.environ.get(
-            "PYDANTIC_AI_GATEWAY_BASE_URL", PYDANTIC_AI_GATEWAY_BASE_URL
+        gateway_base_url = (
+            base_url
+            or os.environ.get("PYDANTIC_AI_GATEWAY_BASE_URL")
+            or _infer_gateway_base_url(gateway_api_key)
         )
 
         # Build http_options with gateway base_url and Authorization header
