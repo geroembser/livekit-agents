@@ -37,6 +37,14 @@ from livekit.agents.utils import is_given
 from .models import ChatModels
 from .utils import CACHE_CONTROL_EPHEMERAL
 
+# Claude 4.6+ no longer supports prefilling (trailing assistant messages).
+_NO_PREFILL_PATTERNS = ("claude-sonnet-4-6", "claude-opus-4-6")
+
+
+def _model_disables_prefill(model: str) -> bool:
+    """Return True if the model does not support assistant message prefilling."""
+    return any(model.startswith(p) for p in _NO_PREFILL_PATTERNS)
+
 
 @dataclass
 class _LLMOptions:
@@ -48,6 +56,7 @@ class _LLMOptions:
     caching: NotGivenOr[Literal["ephemeral"]]
     top_k: NotGivenOr[int]
     max_tokens: NotGivenOr[int]
+    strict_tool_schema: bool
     """If set to "ephemeral", the system prompt, tools, and chat history will be cached."""
 
 
@@ -66,6 +75,7 @@ class LLM(llm.LLM):
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         caching: NotGivenOr[Literal["ephemeral"]] = NOT_GIVEN,
+        _strict_tool_schema: bool = True,
     ) -> None:
         """
         Create a new instance of Anthropic LLM.
@@ -95,6 +105,7 @@ class LLM(llm.LLM):
             caching=caching,
             top_k=top_k,
             max_tokens=max_tokens,
+            strict_tool_schema=_strict_tool_schema,
         )
         anthropic_api_key = api_key if is_given(api_key) else os.environ.get("ANTHROPIC_API_KEY")
         if not anthropic_api_key:
@@ -156,7 +167,9 @@ class LLM(llm.LLM):
             from .tools import AnthropicTool
 
             tool_ctx = llm.ToolContext(tools)
-            tool_schemas = tool_ctx.parse_function_tools("anthropic")
+            tool_schemas = tool_ctx.parse_function_tools(
+                "anthropic", strict=self._opts.strict_tool_schema
+            )
 
             for tool in tool_ctx.provider_tools:
                 if isinstance(tool, AnthropicTool):
@@ -166,9 +179,7 @@ class LLM(llm.LLM):
 
             extra["tools"] = tool_schemas
 
-            tool_choice = (
-                cast(ToolChoice, tool_choice) if is_given(tool_choice) else self._opts.tool_choice
-            )
+            tool_choice = tool_choice if is_given(tool_choice) else self._opts.tool_choice
             if is_given(tool_choice):
                 anthropic_tool_choice: dict[str, Any] | None = {"type": "auto"}
                 if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
@@ -192,7 +203,11 @@ class LLM(llm.LLM):
                         anthropic_tool_choice["disable_parallel_tool_use"] = not parallel_tool_calls
                     extra["tool_choice"] = anthropic_tool_choice
 
-        anthropic_ctx, extra_data = chat_ctx.to_provider_format(format="anthropic")
+        # Claude 4.6+ does not support prefilling (trailing assistant messages).
+        inject_trailing = _model_disables_prefill(self._opts.model)
+        anthropic_ctx, extra_data = chat_ctx.to_provider_format(
+            format="anthropic", inject_trailing_user_message=inject_trailing
+        )
         messages = cast(list[anthropic.types.MessageParam], anthropic_ctx)
         if extra_data.system_messages:
             extra["system"] = [

@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, cast
 
+import google.auth.credentials
 from google.auth._default_async import default_async
 from google.genai import Client, types
 from google.genai.errors import APIError, ClientError, ServerError
@@ -187,6 +188,7 @@ class LLM(llm.LLM):
         seed: NotGivenOr[int] = NOT_GIVEN,
         safety_settings: NotGivenOr[list[types.SafetySettingOrDict]] = NOT_GIVEN,
         thought_signature_storage: ThoughtSignatureStorage | None = None,
+        credentials: google.auth.credentials.Credentials | None = None,
     ) -> None:
         """
         Create a new instance of Google GenAI LLM.
@@ -250,6 +252,11 @@ class LLM(llm.LLM):
         else:
             gcp_project = None
             gcp_location = None
+            if credentials is not None:
+                logger.warning(
+                    "'credentials' is only applicable to VertexAI and will be ignored for the Gemini API"
+                )
+                credentials = None
             if not gemini_api_key:
                 raise ValueError(
                     "API key is required for Google API either via api_key or GOOGLE_API_KEY environment variable"  # noqa: E501
@@ -295,6 +302,7 @@ class LLM(llm.LLM):
             vertexai=use_vertexai,
             project=gcp_project,
             location=gcp_location,
+            credentials=credentials,
         )
         # Store thought_signatures for Gemini 3 multi-turn function calling
         # Use provided storage or create default internal storage
@@ -496,9 +504,7 @@ class LLM(llm.LLM):
         if is_given(extra_kwargs):
             extra.update(extra_kwargs)
 
-        tool_choice = (
-            cast(ToolChoice, tool_choice) if is_given(tool_choice) else self._opts.tool_choice
-        )
+        tool_choice = tool_choice if is_given(tool_choice) else self._opts.tool_choice
         retrieval_config = (
             self._opts.retrieval_config if is_given(self._opts.retrieval_config) else None
         )
@@ -849,7 +855,7 @@ class LLMStream(llm.LLMStream):
                 delta=llm.ChoiceDelta(
                     role="assistant",
                     tool_calls=[tool_call],
-                    content=part.text,
+                    content=None,
                 ),
             )
             return chat_chunk

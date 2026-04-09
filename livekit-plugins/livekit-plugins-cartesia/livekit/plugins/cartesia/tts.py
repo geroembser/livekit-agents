@@ -269,12 +269,12 @@ class TTS(tts.TTS):
         if is_given(language):
             self._opts.language = LanguageCode(language) if language else None
         if is_given(voice):
-            self._opts.voice = cast(str | list[float], voice)
+            self._opts.voice = voice
         if is_given(speed):
             self._opts.speed = cast(TTSVoiceSpeed | float, speed)
         if is_given(emotion):
             emotion = [emotion] if isinstance(emotion, str) else emotion
-            self._opts.emotion = cast(list[TTSVoiceEmotion | str], emotion)
+            self._opts.emotion = emotion
         if is_given(volume):
             self._opts.volume = volume
         if is_given(pronunciation_dict_id):
@@ -402,6 +402,7 @@ class SynthesizeStream(tts.SynthesizeStream):
         sent_tokens = deque[str]()
 
         sent_tokenizer_stream = self._tts._sentence_tokenizer.stream()
+        flush_on_chunk = isinstance(self._tts._sentence_tokenizer, tokenize.SentenceTokenizer)
         if self._tts._stream_pacer:
             sent_tokenizer_stream = self._tts._stream_pacer.wrap(
                 sent_stream=sent_tokenizer_stream,
@@ -412,6 +413,8 @@ class SynthesizeStream(tts.SynthesizeStream):
             ws: aiohttp.ClientWebSocketResponse, cartesia_context_id: str
         ) -> None:
             base_pkt = _to_cartesia_options(self._opts, streaming=True)
+            if flush_on_chunk is True:
+                base_pkt["max_buffer_delay_ms"] = 0
             async for ev in sent_tokenizer_stream:
                 token_pkt = base_pkt.copy()
                 token_pkt["context_id"] = cartesia_context_id
@@ -515,12 +518,16 @@ class SynthesizeStream(tts.SynthesizeStream):
                         extra={"cartesia_context_id": cartesia_context_id, "error": data},
                     )
                     raise APIError(f"Cartesia returned error: {data}")
+                elif data.get("type") == "flush_done":
+                    pass
                 else:
                     logger.warning("unexpected message %s", data)
 
         cartesia_context_id = utils.shortuuid()
         try:
             async with self._tts._pool.connection(timeout=self._conn_options.timeout) as ws:
+                self._acquire_time = self._tts._pool.last_acquire_time
+                self._connection_reused = self._tts._pool.last_connection_reused
                 tasks = [
                     asyncio.create_task(_input_task()),
                     asyncio.create_task(_sentence_stream_task(ws, cartesia_context_id)),

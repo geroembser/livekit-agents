@@ -25,6 +25,7 @@ livekit-plugins-gladia = { workspace = true }
 livekit-plugins-google = { workspace = true }
 livekit-plugins-groq = { workspace = true }
 livekit-plugins-hedra = { workspace = true }
+livekit-plugins-hamming = { workspace = true }
 livekit-plugins-hume = { workspace = true }
 livekit-plugins-inworld = { workspace = true }
 livekit-plugins-keyframe = { workspace = true }
@@ -34,6 +35,7 @@ livekit-plugins-liveavatar = { workspace = true }
 livekit-plugins-lmnt = { workspace = true }
 livekit-plugins-minimax-ai = { workspace = true }
 livekit-plugins-mistralai = { workspace = true }
+livekit-plugins-murf = { workspace = true }
 livekit-plugins-neuphonic = { workspace = true }
 livekit-plugins-nltk = { workspace = true }
 livekit-plugins-nvidia = { workspace = true }
@@ -60,11 +62,15 @@ livekit-plugins-ultravox = { workspace = true }
 livekit-plugins-upliftai = { workspace = true }
 livekit-plugins-gradium = { workspace = true }
 livekit-plugins-xai = { workspace = true }
+livekit-plugins-phonic = { workspace = true }
+livekit-plugins-did = { workspace = true }
 
 [tool.uv.workspace]
 members = ["livekit-plugins/*", "livekit-agents"]
 exclude = [
+    "livekit-plugins/community",
     "livekit-plugins/livekit-blingfire",
+    "livekit-plugins/livekit-blockguard",
     "livekit-plugins/livekit-durable",
 ]
 
@@ -82,7 +88,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "playwright>=1.58.0",
 ]
-docs = ["pdoc3", "setuptools"]
+docs = ["pdoc3", "setuptools", "beautifulsoup4", "markdownify"]
 
 [tool.ruff]
 line-length = 100
@@ -156,6 +162,11 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "smithy_aws_event_stream.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mistralai.*"
+follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
