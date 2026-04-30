@@ -35,7 +35,15 @@ class CartesiaForwarder:
                 parsed_data: dict[str, Any] = json.loads(data) if isinstance(data, str) else data
 
                 # Check if this is a timestamps event
-                if "word_timestamps" in parsed_data:
+                if (
+                    "alignment" in parsed_data
+                    or "normalizedAlignment" in parsed_data
+                    or "isFinal" in parsed_data
+                ):
+                    await self._forward_callback(json.dumps(parsed_data))
+                    if parsed_data.get("isFinal"):
+                        self._last_word_end_sec = None
+                elif "word_timestamps" in parsed_data:
                     # Transform to ElevenLabs character-level format
                     transformed_data = self._transform_timestamps(parsed_data)
                     await self._forward_callback(json.dumps(transformed_data))
@@ -103,7 +111,7 @@ class CartesiaForwarder:
                 char_start_times_ms.append(0)
                 char_durations_ms.append(gap_duration_ms)
 
-        for idx, (word, start_sec, end_sec) in enumerate(zip(words, starts, ends)):
+        for idx, (word, start_sec, end_sec) in enumerate(zip(words, starts, ends, strict=False)):
             # Convert seconds to milliseconds
             start_ms = int(start_sec * 1000)
             end_ms = int(end_sec * 1000)
