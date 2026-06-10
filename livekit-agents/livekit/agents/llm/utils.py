@@ -162,10 +162,16 @@ def serialize_image(image: ImageContent, *, use_cache: bool = True) -> Serialize
                 mime_type = image.mime_type
             else:
                 mime_type = header_mime
-            supported_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+            supported_types = {
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+                "image/gif",
+                "application/pdf",
+            }
             if mime_type not in supported_types:
                 raise ValueError(
-                    f"Unsupported mime_type {mime_type}. Must be jpeg, png, webp, or gif"
+                    f"Unsupported mime_type {mime_type}. Must be jpeg, png, webp, gif, or pdf"
                 )
 
             serialized_image = SerializedImage(
