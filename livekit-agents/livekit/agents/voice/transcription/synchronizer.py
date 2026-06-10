@@ -20,19 +20,6 @@ from ._speaking_rate import SpeakingRateDetector, SpeakingRateStream
 
 STANDARD_SPEECH_RATE = 3.83  # hyphens (syllables) per second
 
-_SENTENCE_END_CHARS = (".", "!", "?", "…")
-
-
-def _ends_sentence(word: str) -> bool:
-    """Whether a forwarded token ends a sentence (used for lookahead pacing).
-
-    False negatives just delay the lookahead by a word; false positives (e.g.
-    abbreviations, ordinals) merely degrade pacing to the word-level behavior
-    at that point, so a simple suffix check is good enough.
-    """
-    stripped = word.rstrip()
-    return bool(stripped) and stripped.endswith(_SENTENCE_END_CHARS)
-
 
 @dataclass
 class _TextSyncOptions:
@@ -320,32 +307,6 @@ class _SegmentSynchronizerImpl:
                 timestamp=ev.timestamp, speaking_rate=ev.speaking_rate
             )
 
-    def _pacing_lead_hyphens(self) -> float:
-        """Difference between the speech position and the forwarded text, in
-        hyphens. Positive: text is behind speech. Negative: text is ahead."""
-        assert self._start_wall_time is not None
-        elapsed = time.time() - self._start_wall_time - self._paused_duration
-
-        if (annotated := self._audio_data.annotated_rate) and (
-            annotated.pushed_duration >= elapsed
-        ):
-            # use the actual speaking rate
-            target_len = int(annotated.accumulate_to(elapsed))
-            forwarded_len = len(self._text_data.forwarded_text)
-            if target_len >= forwarded_len:
-                d_text = self._text_data.pushed_text[forwarded_len:target_len]
-                return float(len(self._calc_hyphens(d_text)))
-            d_text = self._text_data.pushed_text[target_len:forwarded_len]
-            return -float(len(self._calc_hyphens(d_text)))
-
-        if self._speed_on_speaking_unit:
-            # use the estimated speed from speaking rate
-            target_speaking_units = self._audio_data.estimated_rate.accumulate_to(elapsed)
-            target_hyphens = target_speaking_units * self._speed_on_speaking_unit
-            return float(np.ceil(target_hyphens) - self._text_data.forwarded_hyphens)
-
-        return 0.0
-
     @utils.log_exceptions(logger=logger)
     async def _main_task(self) -> None:
         await self._start_fut.wait()
@@ -355,14 +316,6 @@ class _SegmentSynchronizerImpl:
 
         assert self._start_wall_time is not None
 
-        # Sentence-lookahead pacing: the visible transcript stays at or ahead
-        # of the voice, but never more than one sentence ahead. Words inside
-        # the sentence currently being spoken flush immediately; the wait
-        # happens only before the first word of each sentence, until speech
-        # has caught up with everything forwarded so far (the pacing lead goes
-        # negative while we are ahead, which makes the next sentence start
-        # absorb the whole sentence that was flushed early).
-        sentence_start = True
         async for data in self._text_data.word_stream:
             word = data.token
 
@@ -379,27 +332,40 @@ class _SegmentSynchronizerImpl:
                 continue
 
             word_hyphens = len(self._opts.hyphenate_word(word))
+            elapsed = time.time() - self._start_wall_time - self._paused_duration
 
-            if sentence_start:
-                # Re-evaluate in small slices instead of one long sleep so the
-                # wait tracks the live speaking-rate estimate and reacts to
-                # pause/close promptly.
-                while not self.closed and not self._playback_completed:
-                    if not self._output_enabled_ev.is_set():
-                        await self._output_enabled_ev.wait()
-                        if self._interrupted:
-                            return
-                    delay = (
-                        max(0.0, word_hyphens - self._pacing_lead_hyphens()) / self._speed
-                    )
-                    if delay <= 0.05:
-                        break
-                    await self._sleep_if_not_closed(min(delay, 0.25))
+            d_hyphens = 0
+            if (annotated := self._audio_data.annotated_rate) and (
+                annotated.pushed_duration >= elapsed
+            ):
+                # use the actual speaking rate
+                target_len = int(annotated.accumulate_to(elapsed))
+                forwarded_len = len(self._text_data.forwarded_text)
+                if target_len >= forwarded_len:
+                    d_text = self._text_data.pushed_text[forwarded_len:target_len]
+                    d_hyphens = len(self._calc_hyphens(d_text))
+                else:
+                    d_text = self._text_data.pushed_text[target_len:forwarded_len]
+                    d_hyphens = -len(self._calc_hyphens(d_text))
 
+            elif self._speed_on_speaking_unit:
+                # use the estimated speed from speaking rate
+                target_speaking_units = self._audio_data.estimated_rate.accumulate_to(elapsed)
+                target_hyphens = target_speaking_units * self._speed_on_speaking_unit
+                d_hyphens = np.ceil(target_hyphens) - self._text_data.forwarded_hyphens
+
+            delay = max(0.0, word_hyphens - d_hyphens) / self._speed
+
+            # if playback completed, flush the word as soon as possible
+            if self._playback_completed:
+                delay = 0
+
+            await self._sleep_if_not_closed(delay / 2.0)
             self._out_ch.send_nowait(word)
+            await self._sleep_if_not_closed(delay / 2.0)
+
             self._text_data.forwarded_hyphens += word_hyphens
             self._text_data.forwarded_text += word
-            sentence_start = _ends_sentence(word)
 
     def _calc_hyphens(self, text: str) -> list[str]:
         """Calculate hyphens for text."""
