@@ -1162,7 +1162,10 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         user_message: NotGivenOr[llm.ChatMessage] = NOT_GIVEN
         if is_given(user_input):
-            user_message = llm.ChatMessage(role="user", content=[user_input])
+            if isinstance(user_input, llm.ChatMessage):
+                user_message = user_input
+            else:
+                user_message = llm.ChatMessage(role="user", content=[user_input])
             if is_given(user_message_extra):
                 user_message.extra.update(user_message_extra)
 

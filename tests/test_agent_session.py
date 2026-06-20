@@ -14,9 +14,10 @@ from livekit.agents import (
     function_tool,
 )
 from livekit.agents.llm import FunctionToolCall
-from livekit.agents.llm.chat_context import ChatContext, ChatMessage
+from livekit.agents.llm.chat_context import ChatContext, ChatMessage, ImageContent
 from livekit.agents.voice.events import FunctionToolsExecutedEvent
 from livekit.agents.voice.io import PlaybackFinishedEvent
+from livekit.agents.voice.transcription.synchronizer import _SyncedAudioOutput
 
 from .fake_session import FakeActions, create_session, run_session
 
@@ -430,6 +431,54 @@ async def test_interruption_before_speaking(
     assert agent.chat_ctx.items[3].type == "message"
     assert agent.chat_ctx.items[3].role == "user"
     assert agent.chat_ctx.items[3].text_content == "Stop!"
+
+
+async def test_generate_reply_accepts_chat_message_user_input() -> None:
+    input_text = 'look at this\n[uploaded file context: image "graph.png"]'
+    actions = FakeActions()
+    actions.add_llm("I can see the graph.", input=input_text)
+    actions.add_tts(1.0)
+
+    session = create_session(actions)
+    agent = MyAgent()
+    transcription_sync = (
+        session.output.audio._synchronizer
+        if isinstance(session.output.audio, _SyncedAudioOutput)
+        else None
+    )
+    await session.start(agent)
+
+    try:
+        user_message = ChatMessage(
+            role="user",
+            content=[
+                "look at this",
+                '[uploaded file context: image "graph.png"]',
+                ImageContent(
+                    image="https://example.test/storage/graph",
+                    mime_type="image/png",
+                ),
+            ],
+            extra={"existing": True},
+        )
+
+        handle = session.generate_reply(
+            user_input=user_message,
+            user_message_extra={"merged": True},
+        )
+        await asyncio.wait_for(handle.wait_for_playout(), timeout=SESSION_TIMEOUT)
+        await session.drain()
+    finally:
+        await session.aclose()
+        if transcription_sync is not None:
+            await transcription_sync.aclose()
+
+    sent_user_message = agent.chat_ctx.items[2]
+    assert isinstance(sent_user_message, ChatMessage)
+    assert sent_user_message.content[0] == "look at this"
+    assert sent_user_message.content[1] == '[uploaded file context: image "graph.png"]'
+    assert isinstance(sent_user_message.content[2], ImageContent)
+    assert sent_user_message.extra == {"existing": True, "merged": True}
 
 
 async def test_generate_reply() -> None:
