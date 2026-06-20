@@ -225,18 +225,33 @@ class TcpSessionTransport(SessionTransport):
         return msg
 
 
-_AGENT_STATE_MAP: dict[AgentState, agent_pb.AgentState] = {
-    "initializing": agent_pb.AS_INITIALIZING,
-    "idle": agent_pb.AS_IDLE,
-    "listening": agent_pb.AS_LISTENING,
-    "thinking": agent_pb.AS_THINKING,
-    "speaking": agent_pb.AS_SPEAKING,
+def _proto_enum_value(name: str, fallback: int) -> int:
+    """
+    Resolve generated protobuf enum constants across protocol versions.
+
+    Some environments ship slightly older generated `agent_session` modules
+    where a newer symbolic name is missing even though the wire enum value is
+    still compatible.
+    """
+
+    value = getattr(agent_pb, name, None)
+    if isinstance(value, int):
+        return value
+    return fallback
+
+
+_AGENT_STATE_MAP: dict[AgentState, int] = {
+    "initializing": _proto_enum_value("AS_INITIALIZING", 0),
+    "idle": _proto_enum_value("AS_IDLE", 1),
+    "listening": _proto_enum_value("AS_LISTENING", 2),
+    "thinking": _proto_enum_value("AS_THINKING", 3),
+    "speaking": _proto_enum_value("AS_SPEAKING", 4),
 }
 
-_USER_STATE_MAP: dict[UserState, agent_pb.UserState] = {
-    "speaking": agent_pb.US_SPEAKING,
-    "listening": agent_pb.US_LISTENING,
-    "away": agent_pb.US_AWAY,
+_USER_STATE_MAP: dict[UserState, int] = {
+    "speaking": _proto_enum_value("US_SPEAKING", 0),
+    "listening": _proto_enum_value("US_LISTENING", 1),
+    "away": _proto_enum_value("US_AWAY", 2),
 }
 
 _METRICS_FIELDS = (

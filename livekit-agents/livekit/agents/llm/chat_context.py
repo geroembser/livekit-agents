@@ -777,6 +777,9 @@ class ChatContext:
                 Do not mention that a tool/function was called — just preserve the knowledge gained.
                 - Focus on: user goals, constraints, decisions, key facts, preferences, entities, \
                 and any pending or unresolved tasks.
+                - If the history contains a Duckument/document coverage ledger or source-order section list, \
+                preserve it explicitly: include which sections were covered, which section is current, \
+                and which sections remain.
                 - Omit greetings, filler, and chit-chat.
                 - Be concise."""),
         )
