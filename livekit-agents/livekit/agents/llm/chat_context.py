@@ -805,6 +805,11 @@ class ChatContext:
         preserved: list[ChatItem] = []
         for it in head_items:
             if isinstance(it, ChatMessage) and it.role in ("user", "assistant"):
+                # Prior summaries are excluded from the summarization input
+                # (no summary-of-summaries), so dropping them here would
+                # delete them entirely on re-compaction.
+                if it.extra.get("is_summary") is True:
+                    preserved.append(it)
                 continue
             if isinstance(it, (FunctionCall, FunctionCallOutput)):
                 continue

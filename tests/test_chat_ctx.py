@@ -459,6 +459,48 @@ async def test_summarize_skips_when_not_enough_messages():
         assert a.id == b.id
 
 
+@pytest.mark.asyncio
+async def test_summarize_preserves_prior_summary_on_recompaction():
+    from livekit.agents.llm import ChatContext
+
+    ctx = ChatContext()
+    ctx.add_message(role="system", content="System prompt.")
+    ctx.add_message(role="user", content="msg1")
+    ctx.add_message(role="assistant", content="reply1")
+    ctx.add_message(role="user", content="msg2")
+    ctx.add_message(role="assistant", content="reply2")
+    ctx.add_message(role="user", content="msg3")
+    ctx.add_message(role="assistant", content="reply3")
+
+    result = await ctx._summarize(_FixedSummaryLLM("First summary."), keep_last_turns=1)
+
+    # grow the conversation past the keep window again
+    result.add_message(role="user", content="msg4")
+    result.add_message(role="assistant", content="reply4")
+    result.add_message(role="user", content="msg5")
+    result.add_message(role="assistant", content="reply5")
+
+    result = await result._summarize(_FixedSummaryLLM("Second summary."), keep_last_turns=1)
+
+    # the first summary is excluded from the second summarization input
+    # (no summary-of-summaries), so it must survive as its own item
+    summaries = [it for it in result.items if it.type == "message" and it.extra.get("is_summary")]
+    assert len(summaries) == 2
+    assert "First summary." in summaries[0].text_content
+    assert "Second summary." in summaries[1].text_content
+
+    tail_msgs = [
+        it
+        for it in result.items
+        if it.type == "message"
+        and it.role in ("user", "assistant")
+        and not it.extra.get("is_summary")
+    ]
+    assert len(tail_msgs) == 2
+    assert tail_msgs[0].text_content == "msg5"
+    assert tail_msgs[1].text_content == "reply5"
+
+
 # --- truncate tests ---
 
 
