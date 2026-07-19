@@ -1019,6 +1019,13 @@ class LLM(llm.LLM):
         if is_given(response_format):
             extra["response_format"] = llm_utils.to_openai_response_format(response_format)  # type: ignore
 
+        if not tools:
+            # OpenAI rejects tool-related params on tool-less requests (400 on
+            # parallel_tool_calls/tool_choice without tools), which breaks calls
+            # like ChatContext._summarize() reusing a tool-configured LLM
+            extra.pop("parallel_tool_calls", None)
+            extra.pop("tool_choice", None)
+
         return LLMStream(
             self,
             model=self._opts.model,

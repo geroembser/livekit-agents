@@ -272,6 +272,13 @@ class LLM(llm.LLM):
 
         extra.update(self._opts.extra_kwargs)
 
+        if not tools:
+            # providers reject tool-related params on tool-less requests (OpenAI
+            # 400s on parallel_tool_calls/tool_choice without tools), which breaks
+            # calls like ChatContext._summarize() reusing a tool-configured LLM
+            extra.pop("parallel_tool_calls", None)
+            extra.pop("tool_choice", None)
+
         self._client.api_key = create_access_token(self._opts.api_key, self._opts.api_secret)
         return LLMStream(
             self,
