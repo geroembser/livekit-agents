@@ -20,6 +20,7 @@ See https://docs.livekit.io/agents/integrations/stt/google/ for more information
 """
 
 from . import beta, realtime, tools
+from .aiplatform_llm import AIPlatformLLM
 from .llm import (
     LLM,
     PYDANTIC_AI_GATEWAY_BASE_URL,
@@ -40,6 +41,7 @@ __all__ = [
     "__version__",
     "beta",
     "LLM",
+    "AIPlatformLLM",
     "ThoughtSignatureStorage",
     "InMemoryThoughtSignatureStorage",
     "PYDANTIC_AI_GATEWAY_BASE_URL",

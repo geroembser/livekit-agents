@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +50,11 @@ from livekit import api
 from livekit.protocol import agent_pb, metrics as proto_metrics
 
 from ..log import TRACE_LEVEL, logger
+from ..types import (
+    ATTRIBUTE_REDACTION_ENABLED,
+    ATTRIBUTE_SIMULATION_ENABLED,
+    recording_enabled,
+)
 from . import trace_types
 
 if TYPE_CHECKING:
@@ -80,6 +88,79 @@ class _DynamicTracer(Tracer):
 tracer: _DynamicTracer = _DynamicTracer("livekit-agents")
 
 
+class _UploadGate:
+    """Process-wide gate that stops observability uploads once LiveKit Cloud reports data
+    recording is disabled for the project. Reset per session from JobContext.init_recording().
+    """
+
+    # substrings identifying the 401 "data recording is disabled by owner" rejection. Other
+    # 401s ("missing project id", "operation requires observability write grant") share the
+    # same status/grpc code, so we match the message text rather than the code.
+    _DISABLED_MARKERS = ("data recording is disabled", "disabled by owner")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._disabled = False
+
+    def reset(self) -> None:
+        with self._lock:
+            self._disabled = False
+
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
+
+    def disable(self) -> None:
+        with self._lock:
+            if self._disabled:
+                return
+            self._disabled = True
+        logger.warning(
+            "LiveKit Cloud data recording is disabled for this project; "
+            "skipping telemetry and recording uploads for this session"
+        )
+
+    @staticmethod
+    def is_disabled_response(status_code: int, body: bytes) -> bool:
+        """Return True if an upload response means recording is disabled by the project owner."""
+        if status_code != 401:
+            return False
+        text = body.decode("utf-8", "ignore").lower()
+        return any(marker in text for marker in _UploadGate._DISABLED_MARKERS)
+
+
+_upload_gate = _UploadGate()
+
+
+class _AuthRefreshingSession(requests.Session):
+    """requests.Session shared by the OTLP exporters. Injects a fresh auth header on every
+    request and, once the project reports recording is disabled, stops uploading and reports
+    success so the exporters don't keep logging errors."""
+
+    def __init__(self, header_provider: Callable[[], dict[str, str]]) -> None:
+        super().__init__()
+        self._header_provider = header_provider
+
+    @staticmethod
+    def _make_ok_response() -> requests.Response:
+        """A synthetic 200 response so OTLP exporters treat the export as successful."""
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = b""
+        return resp
+
+    def request(self, *args: Any, **kwargs: Any) -> requests.Response:
+        if _upload_gate.disabled:
+            return self._make_ok_response()
+
+        self.headers.update(self._header_provider())
+        resp = super().request(*args, **kwargs)
+        if _upload_gate.is_disabled_response(resp.status_code, resp.content):
+            _upload_gate.disable()
+            return self._make_ok_response()
+        return resp
+
+
 class _MetadataSpanProcessor(SpanProcessor):
     def __init__(self, metadata: dict[str, AttributeValue]) -> None:
         self._metadata = metadata
@@ -96,7 +177,7 @@ class _MetadataLogProcessor(LogRecordProcessor):
         if log_data.log_record.attributes:
             log_data.log_record.attributes.update(self._metadata)  # type: ignore
         else:
-            log_data.log_record.attributes = self._metadata
+            log_data.log_record.attributes = dict(self._metadata)
 
         if log_data.instrumentation_scope:
             log_data.log_record.attributes.update(  # type: ignore
@@ -156,21 +237,16 @@ def _setup_cloud_tracer(
     *,
     room_id: str,
     job_id: str,
+    agent_name: str = "",
     observability_url: str,
     enable_traces: bool = True,
     enable_logs: bool = True,
+    metadata: dict[str, AttributeValue] | None = None,
 ) -> None:
+    _upload_gate.reset()
+
     token_ttl = timedelta(hours=6)
     refresh_margin = timedelta(minutes=5)
-
-    class _AuthRefreshingSession(requests.Session):
-        def __init__(self, header_provider: _AuthHeaderProvider) -> None:
-            super().__init__()
-            self._header_provider = header_provider
-
-        def request(self, *args: Any, **kwargs: Any) -> requests.Response:
-            self.headers.update(self._header_provider())
-            return super().request(*args, **kwargs)
 
     class _AuthHeaderProvider:
         def __init__(self) -> None:
@@ -199,15 +275,24 @@ def _setup_cloud_tracer(
     header_provider = _AuthHeaderProvider()
     session = _AuthRefreshingSession(header_provider)
     otlp_compression = Compression.Gzip
-    metadata: dict[str, AttributeValue] = {"room_id": room_id, "job_id": job_id}
+    base_metadata: dict[str, AttributeValue] = {"room_id": room_id, "job_id": job_id}
+    if agent_name:
+        # identifies the agent for LiveKit Cloud agent insights (explicit dispatch
+        # only; the default dispatch has no agent name). Included in both the
+        # resource (traces) and the session metadata (spans + logs).
+        base_metadata[trace_types.ATTR_AGENT_NAME] = agent_name
+    # cloud agent id and deployment provided by LiveKit Cloud via env vars.
+    # Included in both the resource and the session metadata like agent_name;
+    # omitted when unset.
+    if cloud_agent_id := os.environ.get("LIVEKIT_AGENT_ID"):
+        base_metadata[trace_types.ATTR_CLOUD_AGENT_ID] = cloud_agent_id
+    if deployment_id := os.environ.get("LIVEKIT_AGENT_DEPLOYMENT"):
+        base_metadata[trace_types.ATTR_DEPLOYMENT_ID] = deployment_id
+    session_metadata = dict(base_metadata)
+    if metadata:
+        session_metadata.update(metadata)
 
-    resource = Resource.create(
-        {
-            SERVICE_NAME: "livekit-agents",
-            "room_id": room_id,
-            "job_id": job_id,
-        }
-    )
+    resource = Resource.create({SERVICE_NAME: "livekit-agents", **base_metadata})
 
     if enable_traces:
         # Check if a tracer provider is not set and set one up
@@ -233,7 +318,7 @@ def _setup_cloud_tracer(
         )
 
         if isinstance(tracer_provider, trace_sdk.TracerProvider):
-            tracer_provider.add_span_processor(_MetadataSpanProcessor(metadata))
+            tracer_provider.add_span_processor(_MetadataSpanProcessor(session_metadata))
             tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
 
     # Always set up the logger provider — it's needed for session reports,
@@ -249,7 +334,7 @@ def _setup_cloud_tracer(
             compression=otlp_compression,
             session=session,
         )
-        logger_provider.add_log_record_processor(_MetadataLogProcessor(metadata))
+        logger_provider.add_log_record_processor(_MetadataLogProcessor(session_metadata))
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
 
         handler = _TraceLevelLoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
@@ -294,7 +379,7 @@ def _chat_ctx_to_otel_events(chat_ctx: ChatContext) -> list[tuple[str, Attribute
     for item in chat_ctx.items:
         if item.type == "message" and (event_name := role_to_event.get(item.role)):
             # only support text content for now
-            events.append((event_name, {"content": item.text_content or ""}))
+            events.append((event_name, {"content": item.raw_text_content or ""}))
         elif item.type == "function_call":
             events.append(
                 (
@@ -323,7 +408,9 @@ def _chat_ctx_to_otel_events(chat_ctx: ChatContext) -> list[tuple[str, Attribute
     return events
 
 
-def _to_proto_chat_item(item: ChatItem) -> dict:  # agent_pb.agent_session.ChatContext.ChatItem:
+def _build_proto_chat_item(
+    item: ChatItem,
+) -> agent_pb.agent_session.ChatContext.ChatItem:
     item_pb = agent_pb.agent_session.ChatContext.ChatItem()
 
     if item.type == "message":
@@ -338,10 +425,12 @@ def _to_proto_chat_item(item: ChatItem) -> dict:  # agent_pb.agent_session.ChatC
         }
         msg.role = role_map[item.role]
 
+        from ..llm.chat_context import Instructions
+
         for content in item.content:
-            if isinstance(content, str):
+            if isinstance(content, (str, Instructions)):
                 content_pb = msg.content.add()
-                content_pb.text = content
+                content_pb.text = str(content)
 
         msg.interrupted = item.interrupted
 
@@ -399,7 +488,42 @@ def _to_proto_chat_item(item: ChatItem) -> dict:  # agent_pb.agent_session.ChatC
         ah.new_agent_id = item.new_agent_id
         ah.created_at.FromMilliseconds(int(item.created_at * 1000))
 
-    return MessageToDict(item_pb, preserving_proto_field_name=True)
+    elif item.type == "agent_config_update":
+        acu = item_pb.agent_config_update
+        acu.id = item.id
+        if item.instructions is not None:
+            acu.instructions = item.instructions
+        if item.tools_added:
+            acu.tools_added.extend(item.tools_added)
+        if item.tools_removed:
+            acu.tools_removed.extend(item.tools_removed)
+        acu.created_at.FromMilliseconds(int(item.created_at * 1000))
+
+    return item_pb
+
+
+def _to_proto_chat_item(item: ChatItem) -> dict:
+    return MessageToDict(_build_proto_chat_item(item), preserving_proto_field_name=True)
+
+
+async def _parse_retry_delay(resp: aiohttp.ClientResponse) -> float | None:
+    """Parse a protobuf Status error response for RetryInfo and return the retry delay in seconds,
+    or None if the error is not retryable."""
+    from google.rpc import error_details_pb2, status_pb2  # type: ignore[import-untyped]
+
+    try:
+        body = await resp.read()
+        status = status_pb2.Status()
+        status.ParseFromString(body)
+        for detail in status.details:
+            retry_info = error_details_pb2.RetryInfo()
+            if detail.Unpack(retry_info):
+                delay = retry_info.retry_delay
+                return float(delay.seconds + delay.nanos / 1e9)
+    except Exception:
+        pass
+
+    return None
 
 
 async def _upload_session_report(
@@ -409,7 +533,12 @@ async def _upload_session_report(
     report: SessionReport,
     tagger: Tagger,
     http_session: aiohttp.ClientSession,
+    metadata: dict[str, AttributeValue] | None = None,
 ) -> None:
+    if _upload_gate.disabled:
+        return
+    metadata = metadata or {}
+
     def _get_logger(name: str) -> Any:
         return get_logger_provider().get_logger(
             name=name,
@@ -417,6 +546,7 @@ async def _upload_session_report(
                 "room_id": report.room_id,
                 "job_id": report.job_id,
                 "room": report.room,
+                **metadata,
             },
         )
 
@@ -439,7 +569,7 @@ async def _upload_session_report(
     chat_logger = _get_logger("chat_history")
     recording_options = report.recording_options
 
-    if any(recording_options.values()):
+    if recording_enabled(recording_options):
         _log(
             chat_logger,
             body="session report",
@@ -539,24 +669,18 @@ async def _upload_session_report(
 
     header_msg = proto_metrics.MetricsRecordingHeader(
         room_id=report.room_id,
+        job_id=report.job_id,
+        simulated=bool(metadata.get(ATTRIBUTE_SIMULATION_ENABLED, False)),
+        redaction_enabled=bool(metadata.get(ATTRIBUTE_REDACTION_ENABLED, False)),
     )
     header_msg.start_time.FromMilliseconds(int((report.audio_recording_started_at or 0) * 1000))
     header_bytes = header_msg.SerializeToString()
 
-    mp = aiohttp.MultipartWriter("form-data")
-
-    part = mp.append(header_bytes)
-    part.set_content_disposition("form-data", name="header", filename="header.binpb")
-    part.headers["Content-Type"] = "application/protobuf"
-    part.headers["Content-Length"] = str(len(header_bytes))
-
+    chat_history_json = ""
     if recording_options["transcript"]:
         chat_history_json = json.dumps(report.chat_history.to_dict(exclude_timestamp=False))
-        part = mp.append(chat_history_json)
-        part.set_content_disposition("form-data", name="chat_history", filename="chat_history.json")
-        part.headers["Content-Type"] = "application/json"
-        part.headers["Content-Length"] = str(len(chat_history_json))
 
+    audio_bytes = b""
     if has_audio and report.audio_recording_path:
         try:
             async with aiofiles.open(report.audio_recording_path, "rb") as f:
@@ -564,43 +688,132 @@ async def _upload_session_report(
         except Exception:
             audio_bytes = b""
 
+    url = f"{observability_url}/observability/recordings/v0"
+
+    def _build_multipart() -> aiohttp.MultipartWriter:
+        mp = aiohttp.MultipartWriter("form-data")
+
+        part = mp.append(header_bytes)
+        part.set_content_disposition("form-data", name="header", filename="header.binpb")
+        part.headers["Content-Type"] = "application/protobuf"
+        part.headers["Content-Length"] = str(len(header_bytes))
+
+        if recording_options["transcript"]:
+            part = mp.append(chat_history_json)
+            part.set_content_disposition(
+                "form-data", name="chat_history", filename="chat_history.json"
+            )
+            part.headers["Content-Type"] = "application/json"
+            part.headers["Content-Length"] = str(len(chat_history_json))
+
         if audio_bytes:
             part = mp.append(audio_bytes)
             part.set_content_disposition("form-data", name="audio", filename="recording.ogg")
             part.headers["Content-Type"] = "audio/ogg"
             part.headers["Content-Length"] = str(len(audio_bytes))
 
-    url = f"{observability_url}/observability/recordings/v0"
-    headers = {
-        "Authorization": f"Bearer {jwt}",
-        "Content-Type": mp.content_type,
-    }
+        return mp
 
-    logger.debug("uploading session report to LiveKit Cloud")
-    async with http_session.post(url, data=mp, headers=headers) as resp:
-        resp.raise_for_status()
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        mp = _build_multipart()
+        headers = {
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": mp.content_type,
+        }
+
+        logger.debug("uploading session report to LiveKit Cloud")
+        async with http_session.post(url, data=mp, headers=headers) as resp:
+            if resp.status < 400:
+                break
+
+            body = await resp.read()
+            if _upload_gate.is_disabled_response(resp.status, body):
+                _upload_gate.disable()
+                return
+
+            retry_delay = await _parse_retry_delay(resp)
+            if retry_delay is None or attempt == max_retries:
+                resp.raise_for_status()
+                raise RuntimeError(f"recording upload failed: status {resp.status}")
+
+            logger.warning(
+                "recording upload failed (attempt %d/%d), retrying in %.1fs",
+                attempt + 1,
+                max_retries + 1,
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
 
     logger.debug("finished uploading")
 
 
-def _shutdown_telemetry() -> None:
-    if isinstance(tracer_provider := tracer._tracer_provider, trace_sdk.TracerProvider):
-        logger.debug("shutting down telemetry tracer provider")
-        tracer_provider.force_flush()
-        tracer_provider.shutdown()
+_TELEMETRY_SHUTDOWN_TIMEOUT = 10.0
 
-    if isinstance(logger_provider := get_logger_provider(), LoggerProvider):
-        # remove the OTLP LoggingHandler before flushing to avoid deadlock —
-        # force_flush triggers log export which emits new logs back through the handler
-        root = logging.getLogger()
-        for h in root.handlers[:]:
-            if isinstance(h, LoggingHandler):
-                root.removeHandler(h)
 
-        logger_provider.force_flush()
-        logger_provider.shutdown()  # type: ignore
+def _shutdown_telemetry(timeout: float = _TELEMETRY_SHUTDOWN_TIMEOUT) -> None:
+    """Shut down OTel providers with a hard wall-clock bound.
 
-    if isinstance(meter_provider := metrics_api.get_meter_provider(), SdkMeterProvider):
-        logger.debug("shutting down telemetry meter provider")
-        meter_provider.force_flush()
-        meter_provider.shutdown()
+    ``provider.shutdown()`` internally joins its exporter worker with a 30s
+    default timeout per provider (and ``force_flush`` ignores its timeout arg
+    in the current SDK — see #4623). Across tracer/logger/meter that's up to
+    ~90s, enough to stall the caller's event loop past the supervisor's 60s
+    ping/pong deadline when the OTLP endpoint is rate-limiting or unreachable.
+
+    Each provider is shut down in its *own* daemon thread, run in parallel.
+    That matters for two reasons:
+      1) Main-thread wait is bounded by ``max`` of the three, not the ``sum``.
+      2) ``BatchProcessor.shutdown()`` sets ``_shutdown = True`` as its first
+         action; running in parallel guarantees that flag gets set on every
+         provider within milliseconds, even if one hangs in ``worker_thread.join``.
+         Any later atexit re-entry (OTel registers one, and Python's
+         ``logging.shutdown()`` may spawn a *non-daemon* thread via
+         ``LoggingHandler.flush`` → ``force_flush`` — see opentelemetry-python
+         PR #4636) then short-circuits instead of hanging process exit.
+
+    Any unfinished work stays on existing daemon threads and is discarded at
+    process exit.
+
+    Upstream context:
+    - https://github.com/open-telemetry/opentelemetry-python/issues/4623
+      (TracerProvider.shutdown() has no configurable timeout — still open)
+    """
+    # Detach the OTLP LoggingHandler from the root logger — belt to the
+    # suspenders of the parallel shutdown below.
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, LoggingHandler):
+            root.removeHandler(h)
+
+    providers: list[Any] = []
+    if isinstance(lp := get_logger_provider(), LoggerProvider):
+        providers.append(lp)
+    if isinstance(tp := tracer._tracer_provider, trace_sdk.TracerProvider):
+        providers.append(tp)
+    if isinstance(mp := metrics_api.get_meter_provider(), SdkMeterProvider):
+        providers.append(mp)
+
+    def _shutdown_one(provider: Any) -> None:
+        try:
+            provider.shutdown()
+        except Exception:
+            logger.exception("failed to shut down telemetry provider")
+
+    threads = [
+        threading.Thread(
+            target=_shutdown_one,
+            args=(p,),
+            name=f"livekit-telemetry-shutdown-{type(p).__name__}",
+            daemon=True,
+        )
+        for p in providers
+    ]
+    for t in threads:
+        t.start()
+
+    deadline = time.monotonic() + timeout
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+
+    if any(t.is_alive() for t in threads):
+        logger.warning("telemetry shutdown exceeded %.1fs; continuing", timeout)

@@ -63,6 +63,9 @@ class CollectedResponse(BaseModel):
     text: str = ""
     tool_calls: list[FunctionToolCall] = Field(default_factory=list)
     usage: CompletionUsage | None = None
+    extra: dict[str, Any] = Field(default_factory=dict)
+    """Provider-specific extra data accumulated across chunks
+    (e.g., xAI encrypted reasoning, Google thought signatures)."""
 
 
 class ChoiceDelta(BaseModel):
@@ -99,6 +102,7 @@ class LLM(
     def __init__(self) -> None:
         super().__init__()
         self._label = f"{type(self).__module__}.{type(self).__name__}"
+        self._prewarm_task: asyncio.Task[None] | None = None
 
     @property
     def label(self) -> str:
@@ -140,11 +144,50 @@ class LLM(
         extra_kwargs: NotGivenOr[dict[str, Any]] = NOT_GIVEN,
     ) -> LLMStream: ...
 
-    def prewarm(self) -> None:
-        """Pre-warm connection to the LLM service"""
-        pass
+    def prewarm(self, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Pre-warm connection to the LLM service.
 
-    async def aclose(self) -> None: ...
+        Establishes DNS resolution and the TLS connection to the provider before the
+        first inference request, reducing time-to-first-token on the initial reply.
+        It is called automatically when an ``AgentSession`` is constructed and when an
+        agent activity starts, but can also be called directly.
+
+        Non-blocking (fire-and-forget) and idempotent. Providers enable it by
+        overriding ``_prewarm_impl``.
+
+        Args:
+            loop: Event loop to schedule the prewarm request on. Defaults to the
+                running event loop.
+        """
+        if type(self)._prewarm_impl is LLM._prewarm_impl:
+            return  # no provider-specific prewarm implemented
+
+        if self._prewarm_task is not None:
+            return
+
+        if loop is None:
+            loop = asyncio.get_event_loop()
+
+        async def _prewarm() -> None:
+            try:
+                await self._prewarm_impl()
+            except Exception:
+                pass
+
+        self._prewarm_task = loop.create_task(_prewarm())
+
+    async def _prewarm_impl(self) -> None:
+        """Provider-specific prewarm request, overriding it enables ``prewarm()``.
+
+        Implementations should perform a cheap, token-free request (e.g. listing
+        models) using the same client that serves chat requests, so DNS + TLS are
+        established and a keep-alive connection is left in the pool. Exceptions
+        are swallowed by ``prewarm()``; subclasses overriding ``aclose`` must call
+        ``await super().aclose()`` to cancel an in-flight prewarm."""
+
+    async def aclose(self) -> None:
+        if self._prewarm_task is not None:
+            await aio.cancel_and_wait(self._prewarm_task)
 
     async def __aenter__(self) -> LLM:
         return self
@@ -178,6 +221,7 @@ class LLMStream(ABC):
         self._tee_aiter = aio.itertools.tee(self._event_ch, 2)
         self._event_aiter, monitor_aiter = self._tee_aiter
         self._current_attempt_has_error = False
+        self._provider_request_ids: list[str] = []
         self._metrics_task = asyncio.create_task(
             self._metrics_monitor_task(monitor_aiter), name="LLM._metrics_task"
         )
@@ -212,11 +256,20 @@ class LLMStream(ABC):
             try:
                 with tracer.start_as_current_span("llm_request_run") as attempt_span:
                     attempt_span.set_attribute(trace_types.ATTR_RETRY_COUNT, i)
+                    # Reset per-attempt context ids; the monitor task populates
+                    # this as ChatChunks arrive.
+                    self._provider_request_ids = []
                     try:
-                        return await self._run()
+                        await self._run()
                     except Exception as e:
                         telemetry_utils.record_exception(attempt_span, e)
                         raise
+                    finally:
+                        if self._provider_request_ids:
+                            attempt_span.set_attribute(
+                                trace_types.ATTR_PROVIDER_REQUEST_IDS, self._provider_request_ids
+                            )
+                    return
             except APIError as e:
                 # 499 (Client Closed Request) - close gracefully without raising
                 if isinstance(e, APIStatusError) and e.status_code == 499:
@@ -278,6 +331,8 @@ class LLMStream(ABC):
 
         async for ev in event_aiter:
             request_id = ev.id
+            if request_id and request_id not in self._provider_request_ids:
+                self._provider_request_ids.append(request_id)
             if ttft == -1.0:
                 ttft = time.perf_counter() - start_time
                 completion_start_time = datetime.now(timezone.utc).isoformat()
@@ -428,6 +483,7 @@ class LLMStream(ABC):
         text_parts: list[str] = []
         tool_calls: list[FunctionToolCall] = []
         usage: CompletionUsage | None = None
+        extra: dict[str, Any] = {}
 
         async with self:
             async for chunk in self:
@@ -436,6 +492,8 @@ class LLMStream(ABC):
                         text_parts.append(chunk.delta.content)
                     if chunk.delta.tool_calls:
                         tool_calls.extend(chunk.delta.tool_calls)
+                    if chunk.delta.extra:
+                        extra.update(chunk.delta.extra)
                 if chunk.usage is not None:
                     usage = chunk.usage
 
@@ -443,4 +501,5 @@ class LLMStream(ABC):
             text="".join(text_parts).strip(),
             tool_calls=tool_calls,
             usage=usage,
+            extra=extra,
         )
