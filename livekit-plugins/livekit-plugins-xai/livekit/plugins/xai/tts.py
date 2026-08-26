@@ -20,6 +20,7 @@ import json
 import os
 import weakref
 from dataclasses import dataclass, replace
+from typing import Any, Protocol
 from urllib.parse import urlencode
 
 import aiohttp
@@ -46,6 +47,12 @@ XAI_WEBSOCKET_URL = "wss://api.x.ai/v1/tts"
 DEFAULT_VOICE = "ara"
 
 
+class EventForwarder(Protocol):
+    """Receives every JSON event of the TTS websocket, minus the audio payload."""
+
+    def add_data(self, data: str | dict[str, Any]) -> None: ...
+
+
 @dataclass
 class _TTSOptions:
     voice: GrokVoices | str
@@ -54,6 +61,8 @@ class _TTSOptions:
     optimize_streaming_latency: NotGivenOr[int]
     speed: NotGivenOr[float]
     text_normalization: NotGivenOr[bool]
+    with_timestamps: NotGivenOr[bool]
+    forwarder: EventForwarder | None
 
 
 class TTS(tts.TTS):
@@ -66,6 +75,8 @@ class TTS(tts.TTS):
         optimize_streaming_latency: NotGivenOr[int] = NOT_GIVEN,
         speed: NotGivenOr[float] = NOT_GIVEN,
         text_normalization: NotGivenOr[bool] = NOT_GIVEN,
+        with_timestamps: NotGivenOr[bool] = NOT_GIVEN,
+        forwarder: EventForwarder | None = None,
         tokenizer: tokenize.WordTokenizer | None = None,
         http_session: aiohttp.ClientSession | None = None,
     ) -> None:
@@ -80,6 +91,11 @@ class TTS(tts.TTS):
             optimize_streaming_latency (int, optional): Latency optimization level for the xAI TTS websocket.
             speed (float, optional): Speaking-rate multiplier for the generated audio.
             text_normalization (bool, optional): Whether to normalize text before synthesis.
+            with_timestamps (bool, optional): Ask xAI to attach character-level `audio_timestamps`
+                (cumulative seconds per utterance) to `audio.delta` events. They only reach a
+                `forwarder`; the framework's aligned-transcript path is not used.
+            forwarder (EventForwarder | None, optional): Receives every websocket event of the
+                synthesis (without the base64 audio), e.g. to drive avatar lip-sync from timestamps.
             api_key (str | None, optional): The xAI API key. If not provided, it will be read from the xAI environment variable.
             http_session (aiohttp.ClientSession | None, optional): An existing aiohttp ClientSession to use. If not provided, a new session will be created.
         """  # noqa: E501
@@ -97,7 +113,9 @@ class TTS(tts.TTS):
             )
         self._api_key = resolved_key
         if tokenizer is None:
-            tokenizer = tokenize.basic.WordTokenizer(ignore_punctuation=False)
+            # xAI concatenates deltas verbatim, so tokens must keep their
+            # leading whitespace or the words arrive glued together
+            tokenizer = tokenize.basic.WordTokenizer(ignore_punctuation=False, retain_format=True)
         self._opts = _TTSOptions(
             voice=voice,
             language=language,
@@ -105,6 +123,8 @@ class TTS(tts.TTS):
             optimize_streaming_latency=optimize_streaming_latency,
             speed=speed,
             text_normalization=text_normalization,
+            with_timestamps=with_timestamps,
+            forwarder=forwarder,
         )
 
         self._session = http_session
@@ -146,6 +166,8 @@ class TTS(tts.TTS):
             params["speed"] = opts.speed
         if is_given(opts.text_normalization):
             params["text_normalization"] = str(opts.text_normalization).lower()
+        if is_given(opts.with_timestamps):
+            params["with_timestamps"] = str(opts.with_timestamps).lower()
 
         url = f"{XAI_WEBSOCKET_URL}?{urlencode(params)}"
         try:
@@ -348,9 +370,16 @@ class SynthesizeStream(tts.SynthesizeStream):
                     continue
 
                 data = json.loads(msg.data)
+                if self._opts.forwarder is not None:
+                    self._opts.forwarder.add_data(
+                        {key: value for key, value in data.items() if key != "delta"}
+                    )
                 msg_type = data.get("type")
                 if msg_type == "audio.delta":
-                    output_emitter.push(base64.b64decode(data["delta"]))
+                    # with_timestamps=true also yields trailing deltas that only
+                    # carry `audio_timestamps` and no audio
+                    if audio_b64 := data.get("delta"):
+                        output_emitter.push(base64.b64decode(audio_b64))
                 elif msg_type == "audio.done":
                     if input_ended:
                         output_emitter.end_segment()
