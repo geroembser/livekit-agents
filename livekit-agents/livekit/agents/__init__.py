@@ -79,13 +79,13 @@ from .types import (
 from .version import __version__
 from .voice import (
     Agent,
+    AgentAction,
+    AgentActionEvent,
     AgentEvent,
     AgentFalseInterruptionEvent,
     AgentSession,
     AgentStateChangedEvent,
     AgentTask,
-    AgentAction,
-    AgentActionEvent,
     AudioRecognition,
     CloseEvent,
     CloseReason,

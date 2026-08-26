@@ -8,6 +8,7 @@ logger = logging.getLogger("cartesia-forwarder")
 
 ForwardCallback = Callable[[str], Awaitable[None]]
 
+
 class CartesiaForwarder:
     def __init__(self, forward_callback: ForwardCallback) -> None:
         """
@@ -50,11 +51,7 @@ class CartesiaForwarder:
                 # Check if this is a done event
                 elif parsed_data.get("done"):
                     # Transform to ElevenLabs isFinal format
-                    final_data = {
-                        "isFinal": True,
-                        "alignment": None,
-                        "normalizedAlignment": None
-                    }
+                    final_data = {"isFinal": True, "alignment": None, "normalizedAlignment": None}
                     await self._forward_callback(json.dumps(final_data))
                     # Reset state for next synthesis
                     self._last_word_end_sec = None
@@ -81,16 +78,8 @@ class CartesiaForwarder:
             # No timestamps in this message
             return {
                 "isFinal": False,
-                "alignment": {
-                    "charStartTimesMs": [],
-                    "charDurationsMs": [],
-                    "chars": []
-                },
-                "normalizedAlignment": {
-                    "charStartTimesMs": [],
-                    "charDurationsMs": [],
-                    "chars": []
-                }
+                "alignment": {"charStartTimesMs": [], "charDurationsMs": [], "chars": []},
+                "normalizedAlignment": {"charStartTimesMs": [], "charDurationsMs": [], "chars": []},
             }
 
         # Find the minimum start time in this message to use as offset
@@ -150,14 +139,10 @@ class CartesiaForwarder:
         alignment = {
             "charStartTimesMs": char_start_times_ms,
             "charDurationsMs": char_durations_ms,
-            "chars": chars
+            "chars": chars,
         }
 
-        return {
-            "isFinal": False,
-            "alignment": alignment,
-            "normalizedAlignment": alignment
-        }
+        return {"isFinal": False, "alignment": alignment, "normalizedAlignment": alignment}
 
     async def start(self) -> None:
         """Start the async forwarding loop."""

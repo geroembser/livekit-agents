@@ -10,11 +10,11 @@ from .agent_session import (
 )
 from .audio_recognition import AudioRecognition
 from .events import (
+    AgentAction,
+    AgentActionEvent,
     AgentEvent,
     AgentFalseInterruptionEvent,
     AgentStateChangedEvent,
-    AgentAction,
-    AgentActionEvent,
     CloseEvent,
     CloseReason,
     ConversationItemAddedEvent,

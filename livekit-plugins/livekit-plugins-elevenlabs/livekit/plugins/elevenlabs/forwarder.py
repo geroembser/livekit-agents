@@ -7,6 +7,7 @@ logger = logging.getLogger("elevenlabs-forwarder")
 
 ForwardCallback = Callable[[str | dict[str, Any]], Awaitable[None]]
 
+
 class ElevenlabsForwarder:
     def __init__(self, forward_callback: ForwardCallback) -> None:
         """
