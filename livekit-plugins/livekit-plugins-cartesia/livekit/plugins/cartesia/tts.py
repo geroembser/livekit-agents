@@ -21,7 +21,7 @@ import os
 import weakref
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import aiohttp
 
@@ -49,7 +49,6 @@ from .constants import (
     REQUEST_ID_HEADER,
     USER_AGENT,
 )
-from .forwarder import CartesiaForwarder
 from .log import logger
 from .models import (
     TTSDefaultVoiceId,
@@ -59,6 +58,12 @@ from .models import (
     TTSVoiceSpeed,
     _is_sonic_3,
 )
+
+
+class EventForwarder(Protocol):
+    """Receives every raw provider message of a synthesis, e.g. for avatar lip-sync."""
+
+    def add_data(self, data: str | dict[str, Any]) -> None: ...
 
 
 @dataclass
@@ -76,7 +81,7 @@ class _TTSOptions:
     base_url: str
     api_version: str
     pronunciation_dict_id: str | None
-    forwarder: CartesiaForwarder | None
+    forwarder: EventForwarder | None
 
     def get_http_url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -105,7 +110,7 @@ class TTS(tts.TTS):
         text_pacing: tts.SentenceStreamPacer | bool = False,
         base_url: str = "https://api.cartesia.ai",
         api_version: str = API_VERSION,
-        forwarder: CartesiaForwarder | None = None,
+        forwarder: EventForwarder | None = None,
     ) -> None:
         """
         Create a new instance of Cartesia TTS.
@@ -128,7 +133,7 @@ class TTS(tts.TTS):
             tokenizer (tokenize.SentenceTokenizer, optional): The tokenizer to use. Defaults to `livekit.agents.tokenize.blingfire.SentenceTokenizer`.
             text_pacing (tts.SentenceStreamPacer | bool, optional): Stream pacer for the TTS. Set to True to use the default pacer, False to disable.
             base_url (str, optional): The base URL for the Cartesia API. Defaults to "https://api.cartesia.ai".
-            forwarder (CartesiaForwarder | None, optional): Optional forwarder to receive raw WebSocket messages. Defaults to None.
+            forwarder (EventForwarder | None, optional): Optional forwarder to receive raw WebSocket messages. Defaults to None.
         """  # noqa: E501
 
         super().__init__(

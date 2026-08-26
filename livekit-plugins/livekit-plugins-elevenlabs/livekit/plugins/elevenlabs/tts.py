@@ -24,7 +24,7 @@ import time
 import weakref
 from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import aiohttp
 
@@ -45,7 +45,6 @@ from livekit.agents.utils import is_given
 from livekit.agents.voice.io import TimedString
 
 from ._utils import trace_id_from_headers
-from .forwarder import ElevenlabsForwarder
 from .log import logger
 from .models import TTSEncoding, TTSModels
 
@@ -68,6 +67,12 @@ def _encoding_to_mimetype(encoding: TTSEncoding) -> str:
         return "audio/pcm"
     else:
         raise ValueError(f"Unsupported encoding: {encoding}")
+
+
+class EventForwarder(Protocol):
+    """Receives every raw provider message of a synthesis, e.g. for avatar lip-sync."""
+
+    def add_data(self, data: str | dict[str, Any]) -> None: ...
 
 
 @dataclass
@@ -119,7 +124,7 @@ class TTS(tts.TTS):
         chunk_length_schedule: NotGivenOr[list[int]] = NOT_GIVEN,  # range is [50, 500]
         http_session: aiohttp.ClientSession | None = None,
         language: NotGivenOr[str] = NOT_GIVEN,
-        forwarder: ElevenlabsForwarder | None = None,
+        forwarder: EventForwarder | None = None,
         sync_alignment: bool = True,
         preferred_alignment: Literal["normalized", "original"] = "normalized",
         timestamps_for_non_websockets: bool = False,
@@ -372,76 +377,10 @@ class ChunkedStream(tts.ChunkedStream):
                     # Handle JSON response with timestamps
                     content = await resp.json()
 
-                    # Forward alignment data to forwarder if available
+                    # the raw response carries the alignment; consumers shape it
                     forwarder = self._tts._opts.forwarder
                     if forwarder is not None:
-                        forward_data = {
-                            "isFinal": False,
-                            "alignment": {
-                                "charStartTimesMs": [
-                                    int(float(s) * 1000)
-                                    for s in content.get("alignment", {}).get(
-                                        "character_start_times_seconds", []
-                                    )
-                                ],
-                                "charDurationsMs": [
-                                    int(
-                                        (
-                                            float(d)
-                                            - float(
-                                                content.get("alignment", {}).get(
-                                                    "character_start_times_seconds", []
-                                                )[i]
-                                            )
-                                        )
-                                        * 1000
-                                    )
-                                    for i, d in enumerate(
-                                        content.get("alignment", {}).get(
-                                            "character_end_times_seconds", []
-                                        )
-                                    )
-                                ],
-                                "chars": content.get("alignment", {}).get("characters"),
-                            },
-                            "normalizedAlignment": {
-                                "charStartTimesMs": [
-                                    int(float(s) * 1000)
-                                    for s in content.get("normalized_alignment", {}).get(
-                                        "character_start_times_seconds", []
-                                    )
-                                ],
-                                "charDurationsMs": [
-                                    int(
-                                        (
-                                            float(d)
-                                            - float(
-                                                content.get("normalized_alignment", {}).get(
-                                                    "character_start_times_seconds", []
-                                                )[i]
-                                            )
-                                        )
-                                        * 1000
-                                    )
-                                    for i, d in enumerate(
-                                        content.get("normalized_alignment", {}).get(
-                                            "character_end_times_seconds", []
-                                        )
-                                    )
-                                ],
-                                "chars": content.get("normalized_alignment", {}).get("characters"),
-                            },
-                        }
-                        # Convert to JSON string format similar to websocket messages
-                        forwarder.add_data(json.dumps(forward_data))
-
-                        # forward final message
-                        final_forward_data = {
-                            "isFinal": True,
-                            "alignment": None,
-                            "normalizedAlignment": None,
-                        }
-                        forwarder.add_data(json.dumps(final_forward_data))
+                        forwarder.add_data(content)
 
                     # Decode base64 audio
                     audio_base64 = content.get("audio_base64")
@@ -644,7 +583,7 @@ class _TTSOptions:
     apply_language_text_normalization: NotGivenOr[bool]
     preferred_alignment: NotGivenOr[Literal["normalized", "original"]]
     auto_mode: NotGivenOr[bool]
-    forwarder: ElevenlabsForwarder | None
+    forwarder: EventForwarder | None
     timestamps_for_non_websockets: bool
     pronunciation_dictionary_locators: NotGivenOr[list[PronunciationDictionaryLocator]]
 
