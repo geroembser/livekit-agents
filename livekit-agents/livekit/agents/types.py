@@ -73,6 +73,12 @@ USERDATA_TIMED_TRANSCRIPT = "lk.timed_transcripts"
 The key for the timed transcripts in the audio frame userdata.
 """
 
+USERDATA_TTS_SEGMENT_ID = "lk.tts_segment_id"
+"""
+The key for the TTS segment id (the provider context of the synthesis) in the audio
+frame userdata. Audio outputs use it to tell which synthesis a captured frame belongs to.
+"""
+
 USERDATA_TTS_STARTED_TIME = "lk.tts_started_time"
 """
 The key for the time (``time.perf_counter()``) at which the synthesized text was first

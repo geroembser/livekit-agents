@@ -371,8 +371,13 @@ class SynthesizeStream(tts.SynthesizeStream):
 
                 data = json.loads(msg.data)
                 if self._opts.forwarder is not None:
+                    # xAI events carry no context id; the segment id is what the
+                    # emitted frames are tagged with, so forward it alongside.
                     self._opts.forwarder.add_data(
-                        {key: value for key, value in data.items() if key != "delta"}
+                        {
+                            **{key: value for key, value in data.items() if key != "delta"},
+                            "segment_id": segment_id,
+                        }
                     )
                 msg_type = data.get("type")
                 if msg_type == "audio.delta":

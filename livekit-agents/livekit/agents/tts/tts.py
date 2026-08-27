@@ -23,6 +23,7 @@ from ..telemetry import trace_types, tracer, utils as telemetry_utils
 from ..types import (
     DEFAULT_API_CONNECT_OPTIONS,
     USERDATA_TIMED_TRANSCRIPT,
+    USERDATA_TTS_SEGMENT_ID,
     USERDATA_TTS_STARTED_TIME,
     APIConnectOptions,
 )
@@ -467,6 +468,8 @@ class ChunkedStream(ABC):
             raise StopAsyncIteration from None
 
         val.frame.userdata[USERDATA_TTS_STARTED_TIME] = self._started_time
+        if val.segment_id:
+            val.frame.userdata[USERDATA_TTS_SEGMENT_ID] = val.segment_id
         return val
 
     def __aiter__(self) -> AsyncIterator[SynthesizedAudio]:
@@ -809,6 +812,8 @@ class SynthesizeStream(ABC):
         # it is also reset to 0 between segments after metrics are emitted
         if self._started_time:
             val.frame.userdata[USERDATA_TTS_STARTED_TIME] = self._started_time
+        if val.segment_id:
+            val.frame.userdata[USERDATA_TTS_SEGMENT_ID] = val.segment_id
         return val
 
     def __aiter__(self) -> AsyncIterator[SynthesizedAudio]:

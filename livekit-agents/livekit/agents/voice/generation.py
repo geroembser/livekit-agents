@@ -27,6 +27,7 @@ from ..log import logger
 from ..telemetry import trace_types, tracer
 from ..types import (
     USERDATA_TIMED_TRANSCRIPT,
+    USERDATA_TTS_SEGMENT_ID,
     USERDATA_TTS_STARTED_TIME,
     FlushSentinel,
     NotGivenOr,
@@ -536,14 +537,23 @@ async def _audio_forwarding_task(
                 )
 
             if resampler:
+                # resampled frames are new objects; keep the segment id so the
+                # output can still attribute them to their synthesis
+                segment_id = frame.userdata.get(USERDATA_TTS_SEGMENT_ID)
                 for f in resampler.push(frame):
+                    if segment_id:
+                        f.userdata[USERDATA_TTS_SEGMENT_ID] = segment_id
                     await audio_output.capture_frame(f)
             else:
                 await audio_output.capture_frame(frame)
 
         if resampler:
-            for frame in resampler.flush():
-                await audio_output.capture_frame(frame)
+            last = out.audio[-1] if out.audio else None
+            segment_id = last.userdata.get(USERDATA_TTS_SEGMENT_ID) if last else None
+            for f in resampler.flush():
+                if segment_id:
+                    f.userdata[USERDATA_TTS_SEGMENT_ID] = segment_id
+                await audio_output.capture_frame(f)
 
     except asyncio.CancelledError:
         cancelled = True
