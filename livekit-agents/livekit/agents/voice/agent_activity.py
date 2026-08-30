@@ -1368,10 +1368,8 @@ class AgentActivity(RecognitionHooks):
         if not self._started:
             return
 
-        aec_warmup_active: bool = (
-            self._session.agent_state == "speaking"
-            and self._session._aec_warmup_remaining > 0
-            and self._session._aec_warmup_timer is not None
+        aec_guard_active: bool = (
+            self._session.agent_state == "speaking" and self._session._aec_guard_active()
         )
 
         uninterruptible_speech_active: bool = (
@@ -1382,7 +1380,7 @@ class AgentActivity(RecognitionHooks):
             and self._session.options.interruption["discard_audio_if_uninterruptible"]
         )
 
-        should_discard: bool = aec_warmup_active or uninterruptible_speech_active
+        should_discard: bool = aec_guard_active or uninterruptible_speech_active
 
         # When discarding, substitute silence on the paths that would otherwise
         # see contaminated/echoed audio (STT, realtime model) so the downstream
@@ -2000,8 +1998,9 @@ class AgentActivity(RecognitionHooks):
         if not self._interruption_by_audio_activity_enabled:
             return
 
-        if self._session._aec_warmup_remaining > 0 and self._session._aec_warmup_timer is not None:
-            # disable interruption from audio activity while aec warmup is active
+        if self._session._aec_guard_active():
+            # audio activity during the aec warmup or an utterance onset is echo-prone
+            self._session._note_aec_guard_suppression()
             return
 
         if self._rt_turn_detection_enabled:
@@ -2831,6 +2830,8 @@ class AgentActivity(RecognitionHooks):
                 start_time=started_speaking_at,
                 otel_context=speech_handle._agent_turn_context,
             )
+            if audio_out is not None:
+                self._session._on_agent_audio_started()
             if self._audio_recognition:
                 self._audio_recognition._on_start_of_agent_speech(started_at=started_speaking_at)
             if self.interruption_enabled:
@@ -3292,6 +3293,8 @@ class AgentActivity(RecognitionHooks):
                 start_time=started_speaking_at,
                 otel_context=speech_handle._agent_turn_context,
             )
+            if audio_out is not None:
+                self._session._on_agent_audio_started()
 
             if self._audio_recognition:
                 self._audio_recognition._on_start_of_agent_speech(started_at=started_speaking_at)
@@ -3834,6 +3837,8 @@ class AgentActivity(RecognitionHooks):
                 start_time=started_speaking_at,
                 otel_context=speech_handle._agent_turn_context,
             )
+            if audio_out is not None:
+                self._session._on_agent_audio_started()
             if self._audio_recognition:
                 self._audio_recognition._on_start_of_agent_speech(started_at=started_speaking_at)
             if self.interruption_enabled:

@@ -291,6 +291,7 @@ class AgentSessionOptions:
     tts_text_transforms: Sequence[TextTransforms] | None
     ivr_detection: bool
     aec_warmup_duration: float | None
+    aec_onset_guard_duration: float | None
     session_close_transcript_timeout: float
 
     @property
@@ -386,6 +387,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         userdata: NotGivenOr[Userdata_T] = NOT_GIVEN,
         video_sampler: NotGivenOr[_VideoSampler | None] = NOT_GIVEN,
         aec_warmup_duration: NotGivenOr[float | None] = NOT_GIVEN,
+        aec_onset_guard_duration: float | None = None,
         ivr_detection: bool = False,
         user_away_timeout: float | None = 15.0,
         transcription_timeout: float | None = None,
@@ -491,6 +493,12 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 will ignore user's audio interruptions after the agent starts speaking.
                 This is useful to prevent the agent from being interrupted by echo before AEC is ready.
                 Defaults to ``3.0``, or ``None`` for outbound SIP calls.
+            aec_onset_guard_duration (float, optional): The duration in seconds that the agent
+                ignores user's audio interruptions after each of its utterances starts playing.
+                Echo cancellers re-adapt whenever the far end starts after silence, so the
+                first moments of every agent utterance leak echo that VAD reads as user
+                speech; ``aec_warmup_duration`` only covers the session's first utterance.
+                ``None`` disables it. Defaults to ``None``.
             session_close_transcript_timeout (float, optional): Seconds to wait for the
                 final STT transcript when closing the session (after audio is detached).
                 Default ``2.0`` s (independent of ``commit_user_turn``'s ``transcript_timeout``).
@@ -579,6 +587,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 use_tts_aligned_transcript if is_given(use_tts_aligned_transcript) else None
             ),
             aec_warmup_duration=resolved_aec_warmup_duration,
+            aec_onset_guard_duration=aec_onset_guard_duration,
             session_close_transcript_timeout=session_close_transcript_timeout,
         )
         self._expressive: bool | ExpressiveOptions = expressive
@@ -635,6 +644,10 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         # aec warmup: disable interruptions while AEC warms up
         self._aec_warmup_remaining = resolved_aec_warmup_duration or 0.0
         self._aec_warmup_timer: asyncio.TimerHandle | None = None
+        # per-utterance echo guard, loop time until which audio activity is ignored
+        self._aec_onset_guard_until: float = 0.0
+        self._aec_guard_armed_at: float = 0.0
+        self._aec_guard_suppression_logged: bool = False
 
         # configurable IO
         self._input = io.AgentInput(
@@ -1203,6 +1216,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             self._closing = True
             self._cancel_user_away_timer()
             self._on_aec_warmup_expired()  # always clear aec warmup when closing the session
+            self._aec_onset_guard_until = 0.0
 
             if self._amd is not None:
                 await self._amd.aclose()
@@ -1882,6 +1896,47 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             self._aec_warmup_timer.cancel()
             self._aec_warmup_timer = None
 
+    def _on_agent_audio_started(self) -> None:
+        """Arm the echo guards for a speech whose first audio frame reached the output.
+
+        Driven by the activity rather than by the ``speaking`` state transition: a
+        text-only reply (audio output detached when the speech was scheduled) also
+        transitions to ``speaking`` and would burn the one-shot AEC warmup while
+        nothing is played out.
+        """
+        if self._aec_warmup_remaining > 0 and self._aec_warmup_timer is None:
+            self._aec_warmup_timer = self._loop.call_later(
+                self._aec_warmup_remaining, self._on_aec_warmup_expired
+            )
+            logger.debug(
+                "aec warmup active, disabling interruptions for %.2fs",
+                self._aec_warmup_remaining,
+            )
+
+        if onset_guard := self._opts.aec_onset_guard_duration:
+            self._aec_onset_guard_until = self._loop.time() + onset_guard
+        self._aec_guard_armed_at = self._loop.time()
+        self._aec_guard_suppression_logged = False
+
+    def _note_aec_guard_suppression(self) -> None:
+        """Log the first audio-activity interruption a guard window swallows."""
+        if self._aec_guard_suppression_logged:
+            return
+        self._aec_guard_suppression_logged = True
+        logger.debug(
+            "aec guard suppressed audio activity",
+            extra={
+                "since_audio_started": round(self._loop.time() - self._aec_guard_armed_at, 3),
+                "warmup": self._aec_warmup_timer is not None,
+            },
+        )
+
+    def _aec_guard_active(self) -> bool:
+        """Whether audio activity is currently treated as echo-prone and can't interrupt."""
+        if self._aec_warmup_remaining > 0 and self._aec_warmup_timer is not None:
+            return True
+        return self._loop.time() < self._aec_onset_guard_until
+
     def _on_room_io_participant_linked(self, participant: rtc.RemoteParticipant) -> None:
         if self._aec_warmup_duration_explicit:
             return
@@ -1904,6 +1959,10 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         otel_context: otel_context.Context | None = None,
         start_time: float | None = None,
     ) -> None:
+        if state != "speaking":
+            # the onset guard only covers the agent's own playout
+            self._aec_onset_guard_until = 0.0
+
         if self._agent_state == state:
             return
 
@@ -1927,22 +1986,6 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             # self._agent_speaking_span.set_attribute(trace_types.ATTR_END_TIME, time.time())
             self._agent_speaking_span.end()
             self._agent_speaking_span = None
-
-        # aec warmup: start a one-shot wall-clock timer on the first speaking turn
-        if (
-            state == "speaking"
-            and self._aec_warmup_remaining > 0
-            and self._aec_warmup_timer is None
-            and self._output.audio_enabled
-            and self._output.audio is not None
-        ):
-            self._aec_warmup_timer = self._loop.call_later(
-                self._aec_warmup_remaining, self._on_aec_warmup_expired
-            )
-            logger.debug(
-                "aec warmup active, disabling interruptions for %.2fs",
-                self._aec_warmup_remaining,
-            )
 
         if state == "listening" and self._user_state == "listening":
             self._set_user_away_timer()

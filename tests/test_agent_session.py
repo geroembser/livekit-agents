@@ -1097,6 +1097,94 @@ async def test_aec_warmup() -> None:
     check_timestamp(speaking_to_listening.created_at - t_origin, 5.5, speed_factor=speed)
 
 
+async def test_text_only_speaking_does_not_start_aec_warmup() -> None:
+    """The one-shot AEC warmup must wait for a speech that actually plays audio.
+
+    A text-only reply also transitions the agent to ``speaking``; starting the warmup
+    timer there would leave the session's first spoken utterance unprotected.
+    """
+    session = AgentSession(vad=None, aec_warmup_duration=3.0)
+
+    session._update_agent_state("speaking")
+    assert session._aec_warmup_timer is None
+    assert not session._aec_guard_active()
+
+    session._on_agent_audio_started()
+    assert session._aec_warmup_timer is not None
+    assert session._aec_guard_active()
+
+    session._on_aec_warmup_expired()
+    assert not session._aec_guard_active()
+
+
+async def test_aec_onset_guard_is_released_when_speech_ends() -> None:
+    session = AgentSession(vad=None, aec_warmup_duration=None, aec_onset_guard_duration=1.0)
+
+    session._update_agent_state("speaking")
+    session._on_agent_audio_started()
+    assert session._aec_guard_active()
+
+    session._update_agent_state("listening")
+    assert not session._aec_guard_active()
+
+
+@pytest.mark.parametrize(
+    ("onset_guard", "expected_interrupt_at"),
+    [
+        (None, 9.7),  # VAD interruption 0.5s after the user starts speaking
+        (0.3, 9.7),  # guard expired at ~9.3, before VAD reaches min_duration
+        (2.5, 10.9),  # VAD and transcript paths blocked, falls through to EOU
+    ],
+)
+async def test_aec_onset_guard_blocks_interruptions_at_every_utterance_start(
+    onset_guard: float | None, expected_interrupt_at: float
+) -> None:
+    """Unlike the session-wide warmup, the onset guard re-arms for every utterance.
+
+    The second agent utterance starts playing at ~9.0s and the user speaks at 9.2-10.4s.
+    Without the guard VAD interrupts at 9.7s. With a 2.5s guard the VAD path and the
+    final transcript (10.6s) are blocked, so the interruption comes from the EOU at
+    10.4 + 0.5 = 10.9s.
+    """
+    speed = 1
+    actions = FakeActions()
+    actions.add_user_speech(0.5, 2.5, "Tell me a story.")
+    actions.add_llm("Here is a short story.")
+    actions.add_tts(2.0)  # playout ~3.5-5.5s, never interrupted
+    actions.add_user_speech(7.0, 8.0, "Tell me another one.")
+    actions.add_llm("Here is a long story for you ... the end.")
+    actions.add_tts(15.0)  # playout starts at ~9.0s
+    actions.add_user_speech(9.2, 10.4, "Stop!", stt_delay=0.2)
+
+    session = create_session(
+        actions,
+        speed_factor=speed,
+        extra_kwargs={"aec_warmup_duration": None, "aec_onset_guard_duration": onset_guard},
+    )
+    agent = MyAgent()
+
+    agent_state_events: list[AgentStateChangedEvent] = []
+    playback_finished_events: list[PlaybackFinishedEvent] = []
+    session.on("agent_state_changed", agent_state_events.append)
+    session.output.audio.on("playback_finished", playback_finished_events.append)
+
+    t_origin = await asyncio.wait_for(run_session(session, agent), timeout=SESSION_TIMEOUT)
+
+    assert len(playback_finished_events) == 2
+    assert playback_finished_events[0].interrupted is False
+    assert playback_finished_events[1].interrupted is True
+
+    speaking_events = [e for e in agent_state_events if e.new_state == "speaking"]
+    assert len(speaking_events) == 2
+    second_utterance_idx = agent_state_events.index(speaking_events[1])
+    speaking_to_listening = next(
+        e for e in agent_state_events[second_utterance_idx:] if e.new_state == "listening"
+    )
+    check_timestamp(
+        speaking_to_listening.created_at - t_origin, expected_interrupt_at, speed_factor=speed
+    )
+
+
 async def test_start_boundary_does_not_block_vad_interruption() -> None:
     """backchannel boundary should not interfere with VAD-based interruption when adaptive
     detection is not active. The cooldown timer runs but has no effect on the VAD path.
