@@ -360,6 +360,7 @@ class LLM(llm.LLM):
             project=gcp_project,
             location=gcp_location,
             credentials=credentials,
+            http_options=http_options if is_given(http_options) else None,
         )
         # Store thought_signatures for Gemini 2.5+ multi-turn function calling
         # Use provided storage or create default internal storage
@@ -456,19 +457,13 @@ class LLM(llm.LLM):
 
         # Merge with any provided http_options
         if is_given(http_options):
-            # If http_options provided, merge headers and use provided timeout
-            existing_headers = {}
-            if hasattr(http_options, "headers") and http_options.headers:
-                existing_headers = dict(http_options.headers)
-            merged_headers = {**existing_headers, **gateway_headers}
-            timeout_val = None
-            if hasattr(http_options, "timeout") and http_options.timeout:
-                timeout_val = http_options.timeout
-            # Use dict format for http_options to ensure proper serialization
-            merged_http_options = types.HttpOptions(
-                base_url=gateway_base_url,
-                timeout=timeout_val,
-                headers=merged_headers,
+            # Transport objects such as SSLContext are intended for reuse and cannot
+            # be deep-copied, so preserve all caller options through a shallow copy.
+            merged_http_options = http_options.model_copy(
+                update={
+                    "base_url": gateway_base_url,
+                    "headers": {**(http_options.headers or {}), **gateway_headers},
+                }
             )
         else:
             merged_http_options = types.HttpOptions(

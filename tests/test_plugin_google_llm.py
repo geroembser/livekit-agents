@@ -176,6 +176,18 @@ class TestThoughtSignatureStorage:
 
 
 class TestGatewayOptions:
+    def test_constructor_forwards_http_options_to_google_client(self) -> None:
+        transport_marker = object()
+        http_options = types.HttpOptions(
+            client_args={"verify": transport_marker},
+            async_client_args={"verify": transport_marker, "ssl": transport_marker},
+        )
+
+        with patch("livekit.plugins.google.llm.Client") as client_cls:
+            LLM(api_key="test-api-key", http_options=http_options)
+
+        assert client_cls.call_args.kwargs["http_options"] is http_options
+
     def test_gateway_preserves_new_livekit_options(self) -> None:
         storage = InMemoryThoughtSignatureStorage()
         model = LLM.with_gateway(
@@ -192,6 +204,42 @@ class TestGatewayOptions:
         assert model._opts.cached_content == "cachedContents/abc123"
         assert model._opts.media_resolution == types.MediaResolution.MEDIA_RESOLUTION_LOW
         assert model._opts.http_options.headers["Authorization"] == "Bearer test-gateway-key"
+
+    def test_gateway_preserves_transport_http_options(self) -> None:
+        transport_marker = object()
+        caller_http_options = types.HttpOptions(
+            base_url="https://caller.example.test",
+            api_version="v1",
+            headers={"X-Custom": "value", "Authorization": "caller-value"},
+            timeout=12_345,
+            client_args={"verify": transport_marker},
+            async_client_args={"verify": transport_marker, "ssl": transport_marker},
+        )
+
+        with patch("livekit.plugins.google.llm.Client") as client_cls:
+            model = LLM.with_gateway(
+                api_key="test-gateway-key",
+                base_url="https://gateway.example.test/proxy/google-vertex",
+                http_options=caller_http_options,
+            )
+
+        merged_http_options = model._opts.http_options
+        assert merged_http_options.base_url == ("https://gateway.example.test/proxy/google-vertex")
+        assert merged_http_options.api_version == "v1"
+        assert merged_http_options.timeout == 12_345
+        assert merged_http_options.headers == {
+            "X-Custom": "value",
+            "Authorization": "Bearer test-gateway-key",
+        }
+        assert merged_http_options.client_args["verify"] is transport_marker
+        assert merged_http_options.async_client_args["verify"] is transport_marker
+        assert merged_http_options.async_client_args["ssl"] is transport_marker
+        assert client_cls.call_args.kwargs["http_options"] is merged_http_options
+        assert caller_http_options.base_url == "https://caller.example.test"
+        assert caller_http_options.headers == {
+            "X-Custom": "value",
+            "Authorization": "caller-value",
+        }
 
 
 class TestCachedContentOption:
