@@ -396,6 +396,63 @@ class TestCachedContentRequestSuppression:
         assert caller_http_options.headers == {"X-Vertex-Test": "1"}
 
 
+class TestCrossProviderThoughtSignatureRequest:
+    @staticmethod
+    def _chat_context() -> ChatContext:
+        ctx = ChatContext.empty()
+        ctx.add_message(role="user", content="Create an exercise from the uploaded image.")
+        ctx.insert(
+            llm.FunctionCall(
+                call_id="openai-compatible-call",
+                name="publish_exercise",
+                arguments='{"title":"Fractions"}',
+            )
+        )
+        ctx.insert(
+            llm.FunctionCallOutput(
+                call_id="openai-compatible-call",
+                name="publish_exercise",
+                output='{"status":"published"}',
+                is_error=False,
+            )
+        )
+        return ctx
+
+    @pytest.mark.parametrize("model_name", ["gemini-2.5-flash", "gemini-3-flash-preview"])
+    @pytest.mark.asyncio
+    async def test_gemini_request_signs_foreign_function_call(self, model_name: str) -> None:
+        model = LLM(model=model_name, api_key="test")
+        fake, captured = TestCachedContentRequestSuppression._patched_stream_capture()
+
+        with patch.object(model._client.aio.models, "generate_content_stream", fake):
+            stream = model.chat(chat_ctx=self._chat_context())
+            try:
+                async for _ in stream:
+                    pass
+            finally:
+                await stream.aclose()
+
+        function_call_part = captured["contents"][1].parts[0]
+        assert function_call_part.thought_signature == b"skip_thought_signature_validator"
+
+    @pytest.mark.asyncio
+    async def test_pre_gemini_25_request_omits_signature(self) -> None:
+        model = LLM(model="gemini-2.0-flash", api_key="test")
+        model.thought_signature_storage.store("openai-compatible-call", b"unused-signature")
+        fake, captured = TestCachedContentRequestSuppression._patched_stream_capture()
+
+        with patch.object(model._client.aio.models, "generate_content_stream", fake):
+            stream = model.chat(chat_ctx=self._chat_context())
+            try:
+                async for _ in stream:
+                    pass
+            finally:
+                await stream.aclose()
+
+        function_call_part = captured["contents"][1].parts[0]
+        assert function_call_part.thought_signature is None
+
+
 class TestMediaResolution:
     def test_llm_media_resolution_is_passed_to_stream_kwargs(self):
         model = LLM(

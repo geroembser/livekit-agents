@@ -10,6 +10,8 @@ from livekit.agents.log import logger
 
 from .utils import convert_mid_conversation_instructions, group_tool_calls
 
+_SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
+
 
 @dataclass
 class GoogleFormatData:
@@ -68,9 +70,12 @@ def to_chat_ctx(
                     "args": json.loads(msg.arguments or "{}"),
                 }
             }
-            # Inject thought_signature if available (Gemini 3 multi-turn function calling)
-            if thought_signatures and (sig := thought_signatures.get(msg.call_id)):
-                fc_part["thought_signature"] = sig
+            if thought_signatures is not None:
+                # Cross-provider calls cannot carry Gemini's encrypted signature, so
+                # Google requires its documented validator-skip sentinel instead.
+                fc_part["thought_signature"] = thought_signatures.get(
+                    msg.call_id, _SKIP_THOUGHT_SIGNATURE
+                )
             parts.append(fc_part)
         elif msg.type == "function_call_output":
             response = {"output": msg.output} if not msg.is_error else {"error": msg.output}

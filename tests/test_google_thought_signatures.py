@@ -1,5 +1,6 @@
 import pytest
 
+from livekit.agents.llm import ChatContext, FunctionCall, FunctionCallOutput
 from livekit.plugins.google.llm import (
     _is_gemini_3_flash_model,
     _is_gemini_3_model,
@@ -7,6 +8,52 @@ from livekit.plugins.google.llm import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def _cross_provider_tool_context(call_id: str) -> ChatContext:
+    ctx = ChatContext.empty()
+    ctx.add_message(role="user", content="Create an exercise from the uploaded image.")
+    ctx.insert(
+        FunctionCall(
+            call_id=call_id,
+            name="publish_exercise",
+            arguments='{"title":"Fractions"}',
+        )
+    )
+    ctx.insert(
+        FunctionCallOutput(
+            call_id=call_id,
+            name="publish_exercise",
+            output='{"status":"published"}',
+            is_error=False,
+        )
+    )
+    return ctx
+
+
+class TestCrossProviderThoughtSignatureFormatting:
+    def test_preserves_stored_gemini_signature(self) -> None:
+        ctx = _cross_provider_tool_context("gemini-call")
+
+        turns, _ = ctx.to_provider_format(
+            format="google", thought_signatures={"gemini-call": b"real-signature"}
+        )
+
+        assert turns[1]["parts"][0]["thought_signature"] == b"real-signature"
+
+    def test_foreign_call_gets_validator_skip_signature(self) -> None:
+        ctx = _cross_provider_tool_context("openai-compatible-call")
+
+        turns, _ = ctx.to_provider_format(format="google", thought_signatures={})
+
+        assert turns[1]["parts"][0]["thought_signature"] == (b"skip_thought_signature_validator")
+
+    def test_signature_field_is_omitted_when_handling_is_disabled(self) -> None:
+        ctx = _cross_provider_tool_context("openai-compatible-call")
+
+        turns, _ = ctx.to_provider_format(format="google")
+
+        assert "thought_signature" not in turns[1]["parts"][0]
 
 
 class TestGeminiModelDetection:
