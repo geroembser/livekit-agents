@@ -94,6 +94,9 @@ def test_audio_activity_waits_for_min_words() -> None:
     activity._session._text_only = False
     activity._session._aec_warmup_remaining = 0
     activity._session._aec_warmup_timer = None
+    # the fork folds warmup and onset guard into _aec_guard_active(); a bare
+    # MagicMock would report the guard as active
+    activity._session._aec_guard_active = MagicMock(return_value=False)
     activity._session.options = SimpleNamespace(interruption={"min_words": 2})
     activity._session.agent_state = "speaking"
     activity._audio_recognition = MagicMock()
@@ -124,6 +127,9 @@ def test_rejected_audio_interruption_clears_confirmed_verdict() -> None:
     activity._session = MagicMock()
     activity._session._aec_warmup_remaining = 0
     activity._session._aec_warmup_timer = None
+    # the fork folds warmup and onset guard into _aec_guard_active(); a bare
+    # MagicMock would report the guard as active
+    activity._session._aec_guard_active = MagicMock(return_value=False)
     activity._session.options = SimpleNamespace(interruption={"min_words": 0})
     activity._audio_recognition = MagicMock()
     activity._current_speech = None
