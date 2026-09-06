@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Callable, Hashable
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
@@ -47,6 +47,8 @@ class FallbackAdapter(
         max_retry_per_llm: int = 0,
         retry_interval: float = 0.5,
         retry_on_chunk_sent: bool = False,
+        request_failure: Callable[[BaseException], bool] | None = None,
+        request_key: Callable[[ChatContext], Hashable] | None = None,
     ) -> None:
         """FallbackAdapter is an LLM that can fallback to a different LLM if the current LLM fails.
 
@@ -58,6 +60,15 @@ class FallbackAdapter(
             retry_interval (float, optional): Interval between retries. Defaults to 0.5.
             retry_on_chunk_sent (bool, optional): Whether to retry when a LLM failed after chunks
                 are sent. Defaults to False.
+            request_failure (Callable, optional): Predicate for errors that say nothing about the
+                LLM's health, e.g. a provider content filter refusing one particular reply. Such
+                a failure does not mark the LLM unavailable and starts no recovery probe (which
+                would replay the refused request); instead the LLM is skipped for further calls
+                of the same request. Defaults to None: every failure marks the LLM unavailable.
+            request_key (Callable, optional): Identifies the request a chat context belongs to
+                for ``request_failure`` skips, so a caller's retry with a copied or extended
+                context still avoids the LLM that refused it. Defaults to the identity of the
+                chat context object.
 
         Raises:
             ValueError: If no LLM instances are provided.
@@ -72,6 +83,10 @@ class FallbackAdapter(
         self._max_retry_per_llm = max_retry_per_llm
         self._retry_interval = retry_interval
         self._retry_on_chunk_sent = retry_on_chunk_sent
+        self._request_failure = request_failure
+        self._request_key = request_key
+        # request key -> indices of LLMs that refused that request; bounded, oldest first
+        self._request_skips: dict[Hashable, set[int]] = {}
 
         self._status = [
             _LLMStatus(available=True, recovering_task=None) for _ in self._llm_instances
@@ -135,6 +150,24 @@ class FallbackAdapter(
 
     def _on_metrics_collected(self, *args: Any, **kwargs: Any) -> None:
         self.emit("metrics_collected", *args, **kwargs)
+
+    _MAX_REQUEST_SKIPS: ClassVar[int] = 32
+
+    def _key_for(self, chat_ctx: ChatContext) -> Hashable:
+        if self._request_key is not None:
+            return self._request_key(chat_ctx)
+        return id(chat_ctx)
+
+    def _skipped_for(self, chat_ctx: ChatContext) -> set[int]:
+        return self._request_skips.get(self._key_for(chat_ctx), set())
+
+    def _remember_request_failure(self, chat_ctx: ChatContext, index: int) -> None:
+        key = self._key_for(chat_ctx)
+        skips = self._request_skips.pop(key, set())
+        skips.add(index)
+        self._request_skips[key] = skips
+        while len(self._request_skips) > self._MAX_REQUEST_SKIPS:
+            del self._request_skips[next(iter(self._request_skips))]
 
 
 class FallbackLLMStream(LLMStream):
@@ -271,8 +304,14 @@ class FallbackLLMStream(LLMStream):
         if all_failed:
             logger.error("all LLMs are unavailable, retrying..")
 
-        for i, llm in enumerate(self._fallback_adapter._llm_instances):
-            llm_status = self._fallback_adapter._status[i]
+        adapter = self._fallback_adapter
+        request_skips = adapter._skipped_for(self._chat_ctx)
+
+        for i, llm in enumerate(adapter._llm_instances):
+            llm_status = adapter._status[i]
+            if i in request_skips:
+                # refused this very request earlier; healthy otherwise, so no recovery either
+                continue
             if llm_status.available or all_failed:
                 text_sent: str = ""
                 tool_calls_sent: list[str] = []
@@ -287,10 +326,15 @@ class FallbackLLMStream(LLMStream):
                         self._event_ch.send_nowait(result)
 
                     return
-                except Exception:  # exceptions already logged inside _try_generate
-                    if llm_status.available:
+                except Exception as exc:  # exceptions already logged inside _try_generate
+                    request_failure = (
+                        adapter._request_failure is not None and adapter._request_failure(exc)
+                    )
+                    if request_failure:
+                        adapter._remember_request_failure(self._chat_ctx, i)
+                    elif llm_status.available:
                         llm_status.available = False
-                        self._fallback_adapter.emit(
+                        adapter.emit(
                             "llm_availability_changed",
                             AvailabilityChangedEvent(llm=llm, available=False),
                         )
@@ -310,10 +354,13 @@ class FallbackLLMStream(LLMStream):
                             extra=extra,
                         )
 
+                    if request_failure:
+                        continue
+
             self._try_recovery(llm)
 
         raise APIConnectionError(
-            f"all LLMs failed ({[llm.label for llm in self._fallback_adapter._llm_instances]}) after {time.time() - start_time} seconds"  # noqa: E501
+            f"all LLMs failed ({[llm.label for llm in adapter._llm_instances]}) after {time.time() - start_time} seconds"  # noqa: E501
         )
 
     async def _metrics_monitor_task(self, event_aiter: AsyncIterable[ChatChunk]) -> None:
