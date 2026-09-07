@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from livekit.agents import APIStatusError
+from livekit.agents import APIConnectionError, APIStatusError
 from livekit.agents.llm import LLM, ChatChunk, ChatContext, ChoiceDelta, FallbackAdapter, LLMStream
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
@@ -157,8 +157,39 @@ async def test_all_llms_refusing_the_request_raise_without_touching_availability
     llms = [ScriptedLLM(error=_filtered()), ScriptedLLM(error=_filtered())]
     adapter = FallbackAdapter(llms, request_failure=_is_filtered)
     try:
-        with pytest.raises(Exception, match="all LLMs failed"):
-            await _collect(adapter.chat(chat_ctx=_ctx("hello")))
+        ctx = _ctx("hello")
+        with pytest.raises(APIConnectionError, match="all LLMs failed") as excinfo:
+            await _collect(adapter.chat(chat_ctx=ctx))
         assert all(status.available for status in adapter._status)
+        # nothing left to try for this request: the caller's stream must not retry
+        assert excinfo.value.retryable is False
+
+        # a further call for the same request skips every LLM and says so too
+        with pytest.raises(APIConnectionError) as again:
+            await _collect(adapter.chat(chat_ctx=ctx))
+        assert again.value.retryable is False
+        assert all(llm.calls == 1 for llm in llms)
+
+        # a new request is tried again
+        with pytest.raises(APIConnectionError):
+            await _collect(adapter.chat(chat_ctx=_ctx("next")))
+        assert all(llm.calls == 2 for llm in llms)
     finally:
+        await adapter.aclose()
+
+
+async def test_summary_stays_retryable_when_any_llm_failed_for_another_reason() -> None:
+    llms = [
+        ScriptedLLM(error=_filtered()),
+        ScriptedLLM(error=APIStatusError("quota", status_code=429)),
+    ]
+    adapter = FallbackAdapter(llms, request_failure=_is_filtered)
+    try:
+        with pytest.raises(APIConnectionError) as excinfo:
+            await _collect(adapter.chat(chat_ctx=_ctx("hello")))
+        assert excinfo.value.retryable is True
+        assert adapter._status[0].available is True
+        assert adapter._status[1].available is False
+    finally:
+        await _drain_recovery_tasks(adapter)
         await adapter.aclose()

@@ -306,12 +306,17 @@ class FallbackLLMStream(LLMStream):
 
         adapter = self._fallback_adapter
         request_skips = adapter._skipped_for(self._chat_ctx)
+        # stays True while every LLM either refused this request or was skipped for having
+        # refused it before: retrying the whole adapter can then only repeat the refusals
+        refused_everywhere = True
 
         for i, llm in enumerate(adapter._llm_instances):
             llm_status = adapter._status[i]
             if i in request_skips:
                 # refused this very request earlier; healthy otherwise, so no recovery either
                 continue
+            if not (llm_status.available or all_failed):
+                refused_everywhere = False
             if llm_status.available or all_failed:
                 text_sent: str = ""
                 tool_calls_sent: list[str] = []
@@ -332,7 +337,9 @@ class FallbackLLMStream(LLMStream):
                     )
                     if request_failure:
                         adapter._remember_request_failure(self._chat_ctx, i)
-                    elif llm_status.available:
+                    else:
+                        refused_everywhere = False
+                    if not request_failure and llm_status.available:
                         llm_status.available = False
                         adapter.emit(
                             "llm_availability_changed",
@@ -360,7 +367,10 @@ class FallbackLLMStream(LLMStream):
             self._try_recovery(llm)
 
         raise APIConnectionError(
-            f"all LLMs failed ({[llm.label for llm in adapter._llm_instances]}) after {time.time() - start_time} seconds"  # noqa: E501
+            f"all LLMs failed ({[llm.label for llm in adapter._llm_instances]}) after {time.time() - start_time} seconds",  # noqa: E501
+            # the caller's stream retries retryable errors with backoff; pointless when
+            # every LLM refused the request itself
+            retryable=not refused_everywhere,
         )
 
     async def _metrics_monitor_task(self, event_aiter: AsyncIterable[ChatChunk]) -> None:
