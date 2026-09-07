@@ -64,7 +64,9 @@ class FallbackAdapter(
                 LLM's health, e.g. a provider content filter refusing one particular reply. Such
                 a failure does not mark the LLM unavailable and starts no recovery probe (which
                 would replay the refused request); instead the LLM is skipped for further calls
-                of the same request. Defaults to None: every failure marks the LLM unavailable.
+                of the same request, and the adapter reports the failure (and a sweep in which
+                every LLM refused) as recoverable, since the caller is expected to answer the
+                turn another way. Defaults to None: every failure marks the LLM unavailable.
             request_key (Callable, optional): Identifies the request a chat context belongs to
                 for ``request_failure`` skips, so a caller's retry with a copied or extended
                 context still avoids the LLM that refused it. Defaults to the identity of the
@@ -191,6 +193,20 @@ class FallbackLLMStream(LLMStream):
         self._extra_kwargs = extra_kwargs
 
         self._current_stream: LLMStream | None = None
+        self._refused_everywhere = False
+
+    def _emit_error(self, api_error: Exception, recoverable: bool) -> None:
+        # A refusal of the request itself, on one LLM or on all of them, is not
+        # a failure the session has to survive: the caller answers the turn
+        # another way. Reporting it as unrecoverable would count towards the
+        # session's unrecoverable-error limit and close it after a few refusals.
+        adapter = self._fallback_adapter
+        request_failure = adapter._request_failure is not None and adapter._request_failure(
+            api_error
+        )
+        if request_failure or self._refused_everywhere:
+            recoverable = True
+        super()._emit_error(api_error, recoverable)
 
     @property
     def chat_ctx(self) -> ChatContext:
@@ -309,6 +325,7 @@ class FallbackLLMStream(LLMStream):
         # stays True while every LLM either refused this request or was skipped for having
         # refused it before: retrying the whole adapter can then only repeat the refusals
         refused_everywhere = True
+        self._refused_everywhere = False
 
         for i, llm in enumerate(adapter._llm_instances):
             llm_status = adapter._status[i]
@@ -366,6 +383,7 @@ class FallbackLLMStream(LLMStream):
 
             self._try_recovery(llm)
 
+        self._refused_everywhere = refused_everywhere
         raise APIConnectionError(
             f"all LLMs failed ({[llm.label for llm in adapter._llm_instances]}) after {time.time() - start_time} seconds",  # noqa: E501
             # the caller's stream retries retryable errors with backoff; pointless when

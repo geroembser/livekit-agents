@@ -193,3 +193,40 @@ async def test_summary_stays_retryable_when_any_llm_failed_for_another_reason() 
     finally:
         await _drain_recovery_tasks(adapter)
         await adapter.aclose()
+
+
+async def test_request_refusals_are_reported_as_recoverable_errors() -> None:
+    primary = ScriptedLLM(tokens=("partial ",), error=_filtered())
+    adapter = FallbackAdapter(
+        [primary, ScriptedLLM(error=_filtered())], request_failure=_is_filtered
+    )
+    errors = []
+    adapter.on("error", errors.append)
+    try:
+        # refused after chunks: the refusal itself is raised
+        with pytest.raises(APIStatusError):
+            await _collect(adapter.chat(chat_ctx=_ctx("hello")))
+        # refused everywhere before any chunk: the summary is raised
+        primary.tokens = ()
+        with pytest.raises(APIConnectionError, match="all LLMs failed"):
+            await _collect(adapter.chat(chat_ctx=_ctx("again")))
+        assert [error.recoverable for error in errors] == [True, True]
+    finally:
+        await adapter.aclose()
+
+
+async def test_a_sweep_with_a_real_failure_is_still_reported_as_unrecoverable() -> None:
+    llms = [
+        ScriptedLLM(error=_filtered()),
+        ScriptedLLM(error=APIStatusError("quota", status_code=429, retryable=False)),
+    ]
+    adapter = FallbackAdapter([*llms], request_failure=_is_filtered)
+    errors = []
+    adapter.on("error", errors.append)
+    try:
+        with pytest.raises(APIConnectionError):
+            await _collect(adapter.chat(chat_ctx=_ctx("hello")))
+        assert [error.recoverable for error in errors] == [False]
+    finally:
+        await _drain_recovery_tasks(adapter)
+        await adapter.aclose()
