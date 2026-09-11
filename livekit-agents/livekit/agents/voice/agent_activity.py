@@ -4544,12 +4544,16 @@ class AgentActivity(RecognitionHooks):
                 and audio_output.can_pause
                 and not self._paused_speech.handle.done()
             ):
-                self._session._update_agent_state(
-                    self._paused_speech.agent_state,
-                    otel_context=self._paused_speech.handle._agent_turn_context,
-                )
-                if self._audio_recognition and self._paused_speech.agent_state == "speaking":
-                    self._audio_recognition._on_start_of_agent_speech(started_at=time.time())
+                # The first-frame callback can advance a startup pause from thinking
+                # to speaking before this timer fires. Preserve that newer state and
+                # recognition interval instead of restoring the pre-playout snapshot.
+                if self._session.agent_state != "speaking":
+                    self._session._update_agent_state(
+                        self._paused_speech.agent_state,
+                        otel_context=self._paused_speech.handle._agent_turn_context,
+                    )
+                    if self._audio_recognition and self._paused_speech.agent_state == "speaking":
+                        self._audio_recognition._on_start_of_agent_speech(started_at=time.time())
                 if self.interruption_enabled:
                     self._disable_vad_interruption_soon()
                 audio_output.resume()
