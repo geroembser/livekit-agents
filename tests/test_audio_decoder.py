@@ -517,16 +517,17 @@ async def test_aborted_read_does_not_signal_end_of_input(monkeypatch: pytest.Mon
     pushes: list[None] = []
     ends: list[None] = []
 
-    def slow_push(self: AudioStreamDecoder, chunk: bytes) -> None:
+    def cancel_after_push(self: AudioStreamDecoder, chunk: bytes) -> None:
         pushes.append(None)
-        time.sleep(0.005)  # hold the reader mid-file for the whole test
         real_push(self, chunk)
+        # Cancel after an actual read; slow file opens can outlast a fixed delay.
+        task.cancel()
 
     def spy_end_input(self: AudioStreamDecoder) -> None:
         ends.append(None)
         real_end_input(self)
 
-    monkeypatch.setattr(AudioStreamDecoder, "push", slow_push)
+    monkeypatch.setattr(AudioStreamDecoder, "push", cancel_after_push)
     monkeypatch.setattr(AudioStreamDecoder, "end_input", spy_end_input)
 
     gen = audio_frames_from_file(TEST_AUDIO_FILEPATH)
@@ -536,8 +537,6 @@ async def test_aborted_read_does_not_signal_end_of_input(monkeypatch: pytest.Mon
             pass
 
     task = asyncio.create_task(drain())
-    await asyncio.sleep(0.005)  # one chunk in, many chunks from the end
-    task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
     await gen.aclose()  # what PlayHandle.stop() ultimately triggers

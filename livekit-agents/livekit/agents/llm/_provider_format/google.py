@@ -8,7 +8,11 @@ from typing import Any, Literal
 from livekit.agents import llm
 from livekit.agents.log import logger
 
-from .utils import convert_mid_conversation_instructions, group_tool_calls
+from .utils import (
+    convert_mid_conversation_instructions,
+    group_tool_calls,
+    parse_tool_call_arguments,
+)
 
 _SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
@@ -67,7 +71,7 @@ def to_chat_ctx(
                 "function_call": {
                     "id": msg.call_id,
                     "name": msg.name,
-                    "args": json.loads(msg.arguments or "{}"),
+                    "args": parse_tool_call_arguments(msg),
                 }
             }
             if thought_signatures is not None:
