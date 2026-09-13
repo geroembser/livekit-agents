@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
+import weakref
 from collections.abc import AsyncIterable
 
 import pytest
 
 from livekit import rtc
+from livekit.agents.types import USERDATA_TTS_SEGMENT_ID
 from livekit.agents.voice.generation import forward_generation, perform_audio_forwarding
 from livekit.agents.voice.io import AudioOutput
 from livekit.agents.voice.speech_handle import SpeechHandle
@@ -89,6 +92,53 @@ async def _drive_forwarding(
         tts_output=_source(),
         reconcile_playout_pause=lambda: None,
     )
+
+
+@pytest.mark.parametrize("output_sample_rate", [None, 16000])
+@pytest.mark.parametrize("segment_id", [None, "segment-1"])
+async def test_forwarding_result_does_not_retain_consumed_audio(
+    output_sample_rate: int | None,
+    segment_id: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_output = FakeAudioOutput(sample_rate=output_sample_rate)
+    frames: weakref.WeakSet[rtc.AudioFrame] = weakref.WeakSet()
+    captured_segment_ids: list[str | None] = []
+    capture_frame = audio_output.capture_frame
+
+    async def capture_with_attribution(frame: rtc.AudioFrame) -> None:
+        captured_segment_ids.append(frame.userdata.get(USERDATA_TTS_SEGMENT_ID))
+        await capture_frame(frame)
+
+    monkeypatch.setattr(audio_output, "capture_frame", capture_with_attribution)
+
+    async def _source() -> AsyncIterable[rtc.AudioFrame]:
+        for _ in range(3000):
+            frame = rtc.AudioFrame.create(
+                sample_rate=48000, num_channels=1, samples_per_channel=960
+            )
+            if segment_id is not None:
+                frame.userdata[USERDATA_TTS_SEGMENT_ID] = segment_id
+            frames.add(frame)
+            yield frame
+
+    task, out = perform_audio_forwarding(
+        audio_output=audio_output,
+        tts_output=_source(),
+        reconcile_playout_pause=lambda: None,
+    )
+    try:
+        await task
+        await asyncio.sleep(0)
+        gc.collect()
+
+        assert audio_output._pushed_duration == pytest.approx(60.0)
+        assert not frames
+        assert captured_segment_ids
+        assert set(captured_segment_ids) == {segment_id}
+        assert out.first_frame_fut.done()
+    finally:
+        audio_output.clear_buffer()
 
 
 async def test_own_playback_started_resolves_first_frame_fut() -> None:

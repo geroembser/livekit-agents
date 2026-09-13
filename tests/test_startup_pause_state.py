@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from livekit.agents import Agent, AgentFalseInterruptionEvent, AgentStateChangedEvent
+from livekit.agents import Agent, AgentStateChangedEvent
 from livekit.agents.voice.io import PlaybackFinishedEvent, PlaybackStartedEvent
 
 from .fake_session import FakeActions, create_session, run_session
@@ -19,10 +19,15 @@ from .fake_session import FakeActions, create_session, run_session
 pytestmark = [pytest.mark.unit, pytest.mark.virtual_time, pytest.mark.no_concurrent]
 
 
-@pytest.mark.parametrize("later_transcript", ["", "Stop"])
+@pytest.mark.parametrize(
+    ("later_transcript", "disallow_interruptions"), [("", False), ("Stop", False), ("", True)]
+)
 @pytest.mark.parametrize("onset_guard", [None, 1.0])
 async def test_startup_resume_preserves_started_playback(
-    later_transcript: str, onset_guard: float | None, monkeypatch: pytest.MonkeyPatch
+    later_transcript: str,
+    disallow_interruptions: bool,
+    onset_guard: float | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actions = FakeActions()
     actions.add_user_speech(0.1, 0.4, "Tell me a story.")
@@ -67,9 +72,17 @@ async def test_startup_resume_preserves_started_playback(
         activity.on_start_of_speech(None, time.time())
         assert activity._paused_speech is not None
         saved_states.append(activity._paused_speech.agent_state)
+        if disallow_interruptions:
+
+            def disable_interruptions() -> None:
+                assert activity._current_speech is not None
+                activity._disallow_interruptions(activity._current_speech)
+                record_resume_state()
+
+            session._loop.call_later(0.04, disable_interruptions)
         session._loop.call_later(0.05, activity.on_end_of_speech, None)
 
-    def on_resume(ev: AgentFalseInterruptionEvent) -> None:
+    def record_resume_state() -> None:
         activity = session._activity
         assert activity is not None and activity._audio_recognition is not None
         assert recognition_starts is not None
@@ -83,7 +96,7 @@ async def test_startup_resume_preserves_started_playback(
         )
 
     session.on("agent_state_changed", on_state)
-    session.on("agent_false_interruption", on_resume)
+    session.on("agent_false_interruption", lambda ev: record_resume_state())
     output.on("playback_started", on_playback)
     output.on("playback_finished", finished.append)
 
