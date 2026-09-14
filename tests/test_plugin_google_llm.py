@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -442,6 +443,45 @@ class TestCachedContentRequestSuppression:
         assert "livekit-agents/" in config.http_options.headers["x-goog-api-client"]
         assert caller_http_options.timeout is None
         assert caller_http_options.headers == {"X-Vertex-Test": "1"}
+
+    @pytest.mark.asyncio
+    async def test_request_http_options_survive_the_sdk_deep_copy(self) -> None:
+        """``generate_content_stream`` deep-copies its config (google-genai >= 2.9),
+        so transport objects shared at client level must never reach the request."""
+        ssl_context = ssl.create_default_context()
+        caller_http_options = types.HttpOptions(
+            base_url="https://gateway.example.test/proxy/google",
+            api_version="v1beta",
+            headers={"Authorization": "Bearer test-gateway-key"},
+            timeout=12_345,
+            client_args={"verify": ssl_context},
+            async_client_args={"verify": ssl_context, "ssl": ssl_context},
+        )
+        with patch("livekit.plugins.google.llm.Client"):
+            llm = LLM(model="gemini-2.5-flash", api_key="test", http_options=caller_http_options)
+        llm._client = MagicMock()
+
+        fake, captured = self._patched_stream_capture()
+        with patch.object(llm._client.aio.models, "generate_content_stream", fake):
+            stream = llm.chat(chat_ctx=ChatContext.empty())
+            try:
+                async for _ in stream:
+                    pass
+            finally:
+                await stream.aclose()
+
+        config = captured["config"]
+        # The same operation the SDK performs before building the request.
+        copied = config.model_copy(deep=True)
+        assert copied.http_options.client_args is None
+        assert copied.http_options.async_client_args is None
+        assert copied.http_options.base_url == "https://gateway.example.test/proxy/google"
+        assert copied.http_options.api_version == "v1beta"
+        assert copied.http_options.timeout == 12_345
+        assert copied.http_options.headers["Authorization"] == "Bearer test-gateway-key"
+        assert "livekit-agents/" in copied.http_options.headers["x-goog-api-client"]
+        # The client-level options keep the shared transport context untouched.
+        assert caller_http_options.async_client_args["ssl"] is ssl_context
 
 
 class TestCrossProviderThoughtSignatureRequest:

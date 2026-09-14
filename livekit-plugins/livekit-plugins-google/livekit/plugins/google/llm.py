@@ -739,6 +739,32 @@ class LLM(llm.LLM):
             logger.warning("failed to close the genai client", exc_info=True)
 
 
+def _request_http_options(
+    client_http_options: types.HttpOptions | None, *, default_timeout_ms: int
+) -> types.HttpOptions:
+    """Derive the per-request HttpOptions from the client-level ones.
+
+    Transport objects (client_args/async_client_args, prebuilt httpx or aiohttp
+    clients) are consumed once when the ``Client`` builds its transports. The SDK
+    deep-copies ``GenerateContentConfig`` for every request, so any such object
+    left on the per-request options fails with ``cannot pickle`` (SSLContext,
+    sockets) before a single byte is sent. Only scalar request settings are
+    forwarded here.
+    """
+    opts = client_http_options
+    timeout = opts.timeout if opts is not None and opts.timeout is not None else default_timeout_ms
+    headers = dict(opts.headers or {}) if opts is not None else {}
+    headers["x-goog-api-client"] = f"livekit-agents/{__version__}"
+    return types.HttpOptions(
+        base_url=opts.base_url if opts is not None else None,
+        api_version=opts.api_version if opts is not None else None,
+        headers=headers,
+        timeout=timeout,
+        extra_body=opts.extra_body if opts is not None else None,
+        retry_options=opts.retry_options if opts is not None else None,
+    )
+
+
 class LLMStream(llm.LLMStream):
     def __init__(
         self,
@@ -778,16 +804,10 @@ class LLMStream(llm.LLMStream):
             # attached, `system_instruction` must also live inside the CachedContent
             # resource, so it's dropped from the outgoing request below.
             using_cache = "cached_content" in self._extra_kwargs
-            if is_given(self._llm._opts.http_options):
-                http_options = self._llm._opts.http_options.model_copy()
-                if http_options.timeout is None:
-                    http_options.timeout = int(self._conn_options.timeout * 1000)
-            else:
-                http_options = types.HttpOptions(timeout=int(self._conn_options.timeout * 1000))
-
-            headers = dict(http_options.headers or {})
-            headers["x-goog-api-client"] = f"livekit-agents/{__version__}"
-            http_options.headers = headers
+            http_options = _request_http_options(
+                self._llm._opts.http_options if is_given(self._llm._opts.http_options) else None,
+                default_timeout_ms=int(self._conn_options.timeout * 1000),
+            )
             config = types.GenerateContentConfig(
                 system_instruction=(
                     None
